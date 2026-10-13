@@ -35,7 +35,7 @@ function isDocument(x: unknown): x is CommercialDocument {
 	const d = x as Record<string, unknown>
 	return (
 		typeof d.id === 'string' &&
-		(d.kind === 'invoice' || d.kind === 'order' || d.kind === 'delivery') &&
+		(d.kind === 'quote' || d.kind === 'order' || d.kind === 'delivery' || d.kind === 'invoice') &&
 		typeof d.number === 'string' &&
 		typeof d.date === 'string' &&
 		typeof d.party === 'object' &&

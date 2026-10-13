@@ -32,3 +32,8 @@ export function addDays(date: string, days: number): string {
 export function emptyLine(): DocLine {
 	return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
+
+/** Facture validée, non payée, dont l'échéance est dépassée */
+export function isOverdue(doc: CommercialDocument, now = today()): boolean {
+	return doc.kind === 'invoice' && doc.status === 'validated' && !!doc.dueDate && doc.dueDate < now
+}

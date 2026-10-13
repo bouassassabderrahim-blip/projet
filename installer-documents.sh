@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# À coller dans le terminal, à la racine du projet (dossier contenant src/)
-mkdir -p src/documents && cp src/App.tsx src/App.tsx.bak 2>/dev/null
+# À lancer à la racine du projet (dossier contenant src/)
+set -e
+[ -f src/types.ts ] || { echo "Erreur : lancez ce script dans le dossier du projet (src/types.ts introuvable)"; exit 1; }
+mkdir -p src/documents src/components
+for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx; do [ -f "$f" ] && cp "$f" "$f.bak"; done; true
 
 cat > src/documents/types.ts <<'FIN_DU_FICHIER'
 // Types des documents commerciaux : facture, bon de commande, bon de livraison
 
-/** invoice = facture, order = bon de commande, delivery = bon de livraison (BL) */
-export type DocKind = 'invoice' | 'order' | 'delivery'
+/** quote = devis, order = bon de commande, delivery = bon de livraison (BL), invoice = facture */
+export type DocKind = 'quote' | 'order' | 'delivery' | 'invoice'
 
 /** Taux de TVA en vigueur au Maroc (CGI, art. 98 à 100) */
 export type TvaRate = 0 | 7 | 10 | 14 | 20
@@ -50,21 +53,24 @@ export interface CommercialDocument {
   kind: DocKind
   number: string // ex. FA-2026-0001
   date: string // AAAA-MM-JJ
-  dueDate: string // échéance (factures)
+  dueDate: string // échéance (factures) ou fin de validité (devis)
   party: Party
   lines: DocLine[]
   status: DocStatus
   paymentMethod: PaymentMethod
   notes: string
+  /** Date d'encaissement, renseignée quand la facture passe en « Payée » */
+  paidDate?: string
   /** Document d'origine (ex. le BC ayant donné ce BL) */
   sourceId?: string
   sourceNumber?: string
 }
 
-export const DOC_LABELS: Record<DocKind, { title: string; plural: string; prefix: string }> = {
-  invoice: { title: 'Facture', plural: 'Factures', prefix: 'FA' },
-  order: { title: 'Bon de commande', plural: 'Bons de commande', prefix: 'BC' },
-  delivery: { title: 'Bon de livraison', plural: 'Bons de livraison', prefix: 'BL' },
+export const DOC_LABELS: Record<DocKind, { title: string; plural: string; prefix: string; newLabel: string }> = {
+  quote: { title: 'Devis', plural: 'Devis', prefix: 'DV', newLabel: 'Nouveau devis' },
+  order: { title: 'Bon de commande', plural: 'Bons de commande', prefix: 'BC', newLabel: 'Nouveau bon de commande' },
+  delivery: { title: 'Bon de livraison', plural: 'Bons de livraison', prefix: 'BL', newLabel: 'Nouveau bon de livraison' },
+  invoice: { title: 'Facture', plural: 'Factures', prefix: 'FA', newLabel: 'Nouvelle facture' },
 }
 
 export const STATUS_LABELS: Record<DocStatus, string> = {
@@ -258,6 +264,11 @@ export function addDays(date: string, days: number): string {
 export function emptyLine(): DocLine {
   return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
+
+/** Facture validée, non payée, dont l'échéance est dépassée */
+export function isOverdue(doc: CommercialDocument, now = today()): boolean {
+  return doc.kind === 'invoice' && doc.status === 'validated' && !!doc.dueDate && doc.dueDate < now
+}
 FIN_DU_FICHIER
 echo "OK src/documents/numbering.ts"
 
@@ -299,7 +310,7 @@ function isDocument(x: unknown): x is CommercialDocument {
   const d = x as Record<string, unknown>
   return (
     typeof d.id === 'string' &&
-    (d.kind === 'invoice' || d.kind === 'order' || d.kind === 'delivery') &&
+    (d.kind === 'quote' || d.kind === 'order' || d.kind === 'delivery' || d.kind === 'invoice') &&
     typeof d.number === 'string' &&
     typeof d.date === 'string' &&
     typeof d.party === 'object' &&
@@ -323,6 +334,61 @@ export function useCompany() {
 }
 FIN_DU_FICHIER
 echo "OK src/documents/storage.ts"
+
+cat > src/documents/csv.ts <<'FIN_DU_FICHIER'
+import { computeTotals } from './tva'
+import { PAYMENT_LABELS, STATUS_LABELS, type CommercialDocument } from './types'
+
+type Cell = string | number
+
+/** CSV au format Excel français : séparateur « ; », virgule décimale, BOM UTF-8 pour les accents */
+export function toCsv(rows: Cell[][]): string {
+  const cell = (v: Cell) => {
+    const s = typeof v === 'number' ? v.toFixed(2).replace('.', ',') : v
+    return /[;"\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  return '﻿' + rows.map((r) => r.map(cell).join(';')).join('\r\n')
+}
+
+export function downloadCsv(filename: string, rows: Cell[][]) {
+  const url = URL.createObjectURL(new Blob([toCsv(rows)], { type: 'text/csv;charset=utf-8' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+/** Journal des ventes pour le comptable : une ligne par facture, TVA ventilée par taux */
+export function salesJournal(invoices: CommercialDocument[]): Cell[][] {
+  const rates = [20, 14, 10, 7, 0] as const
+  const header: Cell[] = ['N°', 'Date', 'Client', 'ICE client', 'Total HT']
+  for (const r of rates) header.push(`Base ${r} %`, `TVA ${r} %`)
+  header.push('Total TVA', 'Total TTC', 'Droit de timbre', 'Net à payer', 'Paiement', 'Statut', 'Payée le')
+
+  const rows: Cell[][] = [header]
+  for (const d of invoices) {
+    const t = computeTotals(d)
+    const row: Cell[] = [d.number, d.date, d.party.name, d.party.ice, t.totalHT]
+    for (const r of rates) {
+      const b = t.byRate.find((x) => x.rate === r)
+      row.push(b?.base ?? 0, b?.tva ?? 0)
+    }
+    row.push(
+      t.totalTVA,
+      t.totalTTC,
+      t.stampDuty,
+      t.netToPay,
+      PAYMENT_LABELS[d.paymentMethod],
+      STATUS_LABELS[d.status],
+      d.paidDate ?? '',
+    )
+    rows.push(row)
+  }
+  return rows
+}
+FIN_DU_FICHIER
+echo "OK src/documents/csv.ts"
 
 cat > src/documents/DocumentEditor.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
@@ -408,12 +474,14 @@ export default function DocumentEditor({ initial, products, knownParties, onSave
           Date{' '}
           <input type="date" value={doc.date} onChange={(e) => update({ date: e.target.value })} />
         </label>
+        {(isInvoice || doc.kind === 'quote') && (
+          <label>
+            {isInvoice ? 'Échéance' : "Valable jusqu'au"}{' '}
+            <input type="date" value={doc.dueDate} onChange={(e) => update({ dueDate: e.target.value })} />
+          </label>
+        )}
         {isInvoice && (
           <>
-            <label>
-              Échéance{' '}
-              <input type="date" value={doc.dueDate} onChange={(e) => update({ dueDate: e.target.value })} />
-            </label>
             <label>
               Mode de paiement{' '}
               <select
@@ -624,6 +692,7 @@ export default function DocumentPrint({ doc, company, onClose }: Props) {
             <div>N° {doc.number}</div>
             <div>Date : {frDate(doc.date)}</div>
             {doc.kind === 'invoice' && doc.dueDate && <div>Échéance : {frDate(doc.dueDate)}</div>}
+            {doc.kind === 'quote' && doc.dueDate && <div>Valable jusqu'au : {frDate(doc.dueDate)}</div>}
             {doc.sourceNumber && <div>Réf. : {doc.sourceNumber}</div>}
           </div>
         </header>
@@ -719,7 +788,7 @@ export default function DocumentPrint({ doc, company, onClose }: Props) {
 
         {doc.kind !== 'invoice' && (
           <div className="doc-signatures">
-            <div>{doc.kind === 'delivery' ? 'Signature du livreur' : 'Cachet et signature du fournisseur'}</div>
+            <div>{doc.kind === 'delivery' ? 'Signature du livreur' : "Cachet et signature de l'entreprise"}</div>
             <div>{doc.kind === 'delivery' ? 'Reçu conforme : cachet et signature du client' : 'Bon pour accord : cachet et signature du client'}</div>
           </div>
         )}
@@ -753,7 +822,8 @@ import { useMemo, useState } from 'react'
 import type { Product } from '../types'
 import DocumentEditor from './DocumentEditor'
 import DocumentPrint from './DocumentPrint'
-import { addDays, emptyLine, newId, nextNumber, today } from './numbering'
+import { downloadCsv, salesJournal } from './csv'
+import { addDays, emptyLine, isOverdue, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
   DOC_LABELS,
@@ -776,14 +846,15 @@ interface Props {
   company: CompanyInfo
   /** Aller vers la page d'un autre type de document (après une conversion) */
   onNavigate?: (kind: DocKind) => void
-  /** Appelé quand un BL est validé : utile pour décrémenter le stock */
+  /** Appelé quand un BL est validé (quantités positives) ou annulé (quantités négatives) */
   onDelivered?: (lines: DocLine[]) => void
 }
 
 type View = { mode: 'list' } | { mode: 'edit'; doc: CommercialDocument } | { mode: 'print'; id: string }
 
-/** Chaîne commerciale : BC → BL → Facture */
+/** Chaîne commerciale : Devis → BC → BL → Facture */
 const CONVERSIONS: Record<DocKind, DocKind[]> = {
+  quote: ['order', 'invoice'],
   order: ['delivery', 'invoice'],
   delivery: ['invoice'],
   invoice: [],
@@ -819,20 +890,27 @@ export default function DocumentsPage({
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
   }, [documents])
 
-  // Indicateurs pour les factures (hors annulées)
+  // Indicateurs pour les factures validées ou payées
   const stats = useMemo(() => {
     if (kind !== 'invoice') return null
+    const now = today()
     let ht = 0
     let tva = 0
     let unpaid = 0
+    let late = 0
+    let lateCount = 0
     for (const d of documents) {
       if (d.kind !== 'invoice' || d.status === 'cancelled' || d.status === 'draft') continue
       const t = computeTotals(d)
       ht += t.totalHT
       tva += t.totalTVA
       if (d.status !== 'paid') unpaid += t.netToPay
+      if (isOverdue(d, now)) {
+        late += t.netToPay
+        lateCount++
+      }
     }
-    return { ht: round2(ht), tva: round2(tva), unpaid: round2(unpaid) }
+    return { ht: round2(ht), tva: round2(tva), unpaid: round2(unpaid), late: round2(late), lateCount }
   }, [documents, kind])
 
   function createDoc(): CommercialDocument {
@@ -842,7 +920,8 @@ export default function DocumentsPage({
       kind,
       number: nextNumber(kind, documents, date),
       date,
-      dueDate: addDays(date, 60), // délai légal par défaut au Maroc : 60 jours
+      // Facture : délai légal de paiement par défaut de 60 jours ; devis : validité de 30 jours
+      dueDate: addDays(date, kind === 'quote' ? 30 : 60),
       party: emptyParty(),
       lines: [emptyLine()],
       status: 'draft',
@@ -858,8 +937,26 @@ export default function DocumentsPage({
   }
 
   function setStatus(doc: CommercialDocument, status: DocStatus) {
-    onChange(documents.map((d) => (d.id === doc.id ? { ...d, status } : d)))
-    if (status === 'validated' && doc.kind === 'delivery') onDelivered?.(doc.lines)
+    let paidDate: string | undefined
+    if (status === 'paid') {
+      // La date d'encaissement sert à la déclaration de TVA (régime des encaissements)
+      const answer = prompt("Date d'encaissement (AAAA-MM-JJ)", today())
+      if (answer === null) return
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(answer.trim())) return alert('Date invalide : utilisez le format AAAA-MM-JJ.')
+      paidDate = answer.trim()
+    }
+    onChange(documents.map((d) => (d.id === doc.id ? { ...d, status, paidDate } : d)))
+    if (doc.kind === 'delivery' && status === 'validated') onDelivered?.(doc.lines)
+    // Annuler un BL déjà validé remet les quantités en stock
+    if (doc.kind === 'delivery' && status === 'cancelled' && doc.status === 'validated')
+      onDelivered?.(doc.lines.map((l) => ({ ...l, quantity: -l.quantity })))
+  }
+
+  function exportJournal() {
+    const invoices = documents
+      .filter((d) => d.kind === 'invoice' && d.status !== 'draft')
+      .sort((a, b) => a.number.localeCompare(b.number))
+    downloadCsv(`journal-ventes-${today()}.csv`, salesJournal(invoices))
   }
 
   function remove(doc: CommercialDocument) {
@@ -876,8 +973,9 @@ export default function DocumentsPage({
         id: newId(),
         number: nextNumber(kind, documents, date),
         date,
-        dueDate: addDays(date, 60),
+        dueDate: addDays(date, kind === 'quote' ? 30 : 60),
         status: 'draft',
+        paidDate: undefined,
         sourceId: undefined,
         sourceNumber: undefined,
         lines: doc.lines.map((l) => ({ ...l, id: newId() })),
@@ -893,8 +991,9 @@ export default function DocumentsPage({
       kind: to,
       number: nextNumber(to, documents, date),
       date,
-      dueDate: addDays(date, 60),
+      dueDate: addDays(date, to === 'quote' ? 30 : 60),
       status: 'draft',
+      paidDate: undefined,
       sourceId: doc.id,
       sourceNumber: doc.number,
       lines: doc.lines.map((l) => ({ ...l, id: newId() })),
@@ -943,6 +1042,10 @@ export default function DocumentsPage({
             <span>Reste à encaisser</span>
             <strong>{formatMAD(stats.unpaid)}</strong>
           </div>
+          <div className={stats.lateCount ? 'doc-stat-late' : undefined}>
+            <span>En retard ({stats.lateCount})</span>
+            <strong>{formatMAD(stats.late)}</strong>
+          </div>
         </div>
       )}
 
@@ -959,8 +1062,13 @@ export default function DocumentsPage({
 
       <div className="export-bar">
         <button type="button" onClick={() => setView({ mode: 'edit', doc: createDoc() })}>
-          + Nouveau {labels.title.toLowerCase()}
+          + {labels.newLabel}
         </button>
+        {kind === 'invoice' && (
+          <button type="button" onClick={exportJournal}>
+            Exporter le journal des ventes (CSV)
+          </button>
+        )}
         <input placeholder="Rechercher (n°, client)" value={search} onChange={(e) => setSearch(e.target.value)} />
         <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as DocStatus | '')}>
           <option value="">Tous les statuts</option>
@@ -997,6 +1105,7 @@ export default function DocumentsPage({
                   <td className="num">{formatMAD(t.netToPay)}</td>
                   <td>
                     <span className={`doc-badge doc-badge-${d.status}`}>{STATUS_LABELS[d.status]}</span>
+                    {isOverdue(d) && <span className="doc-badge doc-badge-late">En retard</span>}
                   </td>
                   <td className="doc-actions">
                     <button type="button" onClick={() => setView({ mode: 'print', id: d.id })}>
@@ -1113,6 +1222,189 @@ export default function CompanySettings({ company, onChange }: Props) {
 }
 FIN_DU_FICHIER
 echo "OK src/documents/CompanySettings.tsx"
+
+cat > src/documents/VatPage.tsx <<'FIN_DU_FICHIER'
+import { useMemo, useState } from 'react'
+import { downloadCsv } from './csv'
+import { computeTotals, formatMAD, round2 } from './tva'
+import type { CommercialDocument, TvaRate } from './types'
+import './documents.css'
+
+interface Props {
+  documents: CommercialDocument[]
+}
+
+/** Encaissements : régime de droit commun au Maroc. Débits : sur option, TVA due dès la facturation. */
+type Regime = 'encaissement' | 'debit'
+type Periodicity = 'month' | 'quarter'
+
+const RATES: TvaRate[] = [20, 14, 10, 7]
+const MONTHS = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
+
+interface PeriodRow {
+  label: string
+  ht: number
+  tva: Record<number, number>
+  total: number
+  count: number
+}
+
+/** TVA collectée par période, à reporter sur la déclaration (la TVA déductible sur achats n'est pas suivie ici) */
+export default function VatPage({ documents }: Props) {
+  const years = useMemo(() => {
+    const set = new Set<number>([new Date().getFullYear()])
+    for (const d of documents) if (d.kind === 'invoice') set.add(Number(d.date.slice(0, 4)))
+    return [...set].sort((a, b) => b - a)
+  }, [documents])
+
+  const [year, setYear] = useState(years[0])
+  const [regime, setRegime] = useState<Regime>('encaissement')
+  const [periodicity, setPeriodicity] = useState<Periodicity>('month')
+
+  const rows = useMemo(() => {
+    const count = periodicity === 'month' ? 12 : 4
+    const result: PeriodRow[] = Array.from({ length: count }, (_, i) => ({
+      label: periodicity === 'month' ? MONTHS[i] : `T${i + 1} (${MONTHS[i * 3]} – ${MONTHS[i * 3 + 2]})`,
+      ht: 0,
+      tva: {},
+      total: 0,
+      count: 0,
+    }))
+
+    for (const d of documents) {
+      if (d.kind !== 'invoice' || d.status === 'draft' || d.status === 'cancelled') continue
+      const ref = regime === 'encaissement' ? (d.status === 'paid' ? d.paidDate : undefined) : d.date
+      if (!ref || Number(ref.slice(0, 4)) !== year) continue
+      const month = Number(ref.slice(5, 7)) - 1
+      const row = result[periodicity === 'month' ? month : Math.floor(month / 3)]
+      const t = computeTotals(d)
+      row.ht += t.totalHT
+      row.count++
+      for (const r of t.byRate) {
+        row.tva[r.rate] = (row.tva[r.rate] ?? 0) + r.tva
+        row.total += r.tva
+      }
+    }
+    return result
+  }, [documents, year, regime, periodicity])
+
+  const totals = rows.reduce(
+    (acc, r) => {
+      acc.ht += r.ht
+      acc.total += r.total
+      for (const rate of RATES) acc.tva[rate] = (acc.tva[rate] ?? 0) + (r.tva[rate] ?? 0)
+      return acc
+    },
+    { ht: 0, total: 0, tva: {} as Record<number, number> },
+  )
+
+  function exportCsv() {
+    const header = ['Période', 'Factures', 'CA HT', ...RATES.map((r) => `TVA ${r} %`), 'TVA collectée']
+    const body = rows.map((r) => [r.label, String(r.count), round2(r.ht), ...RATES.map((x) => round2(r.tva[x] ?? 0)), round2(r.total)])
+    downloadCsv(`tva-collectee-${year}-${regime}.csv`, [header, ...body])
+  }
+
+  return (
+    <div>
+      <div className="export-bar">
+        <label>
+          Année{' '}
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))}>
+            {years.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Régime{' '}
+          <select value={regime} onChange={(e) => setRegime(e.target.value as Regime)}>
+            <option value="encaissement">Encaissements (date de paiement)</option>
+            <option value="debit">Débits (date de facture)</option>
+          </select>
+        </label>
+        <label>
+          Déclaration{' '}
+          <select value={periodicity} onChange={(e) => setPeriodicity(e.target.value as Periodicity)}>
+            <option value="month">Mensuelle</option>
+            <option value="quarter">Trimestrielle</option>
+          </select>
+        </label>
+        <button type="button" onClick={exportCsv}>
+          Exporter (CSV)
+        </button>
+      </div>
+
+      <div className="doc-stats">
+        <div>
+          <span>CA HT {year}</span>
+          <strong>{formatMAD(round2(totals.ht))}</strong>
+        </div>
+        <div>
+          <span>TVA collectée {year}</span>
+          <strong>{formatMAD(round2(totals.total))}</strong>
+        </div>
+      </div>
+
+      <table className="doc-table">
+        <thead>
+          <tr>
+            <th>Période</th>
+            <th className="num">Factures</th>
+            <th className="num">CA HT</th>
+            {RATES.map((r) => (
+              <th key={r} className="num">
+                TVA {r} %
+              </th>
+            ))}
+            <th className="num">TVA collectée</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={r.label}>
+              <td>{r.label}</td>
+              <td className="num">{r.count}</td>
+              <td className="num">{formatMAD(round2(r.ht))}</td>
+              {RATES.map((x) => (
+                <td key={x} className="num">
+                  {formatMAD(round2(r.tva[x] ?? 0))}
+                </td>
+              ))}
+              <td className="num">
+                <strong>{formatMAD(round2(r.total))}</strong>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+        <tfoot>
+          <tr>
+            <th>Total</th>
+            <th className="num">{rows.reduce((s, r) => s + r.count, 0)}</th>
+            <th className="num">{formatMAD(round2(totals.ht))}</th>
+            {RATES.map((x) => (
+              <th key={x} className="num">
+                {formatMAD(round2(totals.tva[x] ?? 0))}
+              </th>
+            ))}
+            <th className="num">{formatMAD(round2(totals.total))}</th>
+          </tr>
+        </tfoot>
+      </table>
+
+      <p className="doc-info">
+        {regime === 'encaissement'
+          ? 'Régime des encaissements : seules les factures marquées « Payée » sont comptées, à leur date de paiement.'
+          : 'Régime des débits : les factures validées sont comptées à leur date de facturation, payées ou non.'}{' '}
+        Ce tableau donne la TVA collectée sur vos ventes. La TVA déductible sur vos achats n'y figure pas : faites
+        valider votre déclaration par votre comptable.
+      </p>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/VatPage.tsx"
 
 cat > src/documents/documents.css <<'FIN_DU_FICHIER'
 .doc-editor fieldset {
@@ -1285,11 +1577,354 @@ cat > src/documents/documents.css <<'FIN_DU_FICHIER'
   }
   .no-print { display: none !important; }
 }
+
+.doc-badge-late { background: #fef3c7; color: #92400e; margin-left: 4px; }
+.doc-stats .doc-stat-late { border-color: #f5c26b; background: #fffbeb; }
 FIN_DU_FICHIER
 echo "OK src/documents/documents.css"
 
+cat > src/components/Sidebar.tsx <<'FIN_DU_FICHIER'
+import type { PageId } from '../types'
+
+interface SidebarProps {
+  current: PageId
+  onNavigate: (page: PageId) => void
+  /** Petit compteur affiché à côté d'une page (ex. factures en retard) */
+  badges?: Partial<Record<PageId, number>>
+}
+
+const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
+  {
+    title: 'Pilotage',
+    items: [
+      { id: 'dashboard', label: 'Tableau de bord' },
+      { id: 'products', label: 'Rentabilité produits' },
+      { id: 'breakeven', label: 'Résultat & seuil' },
+      { id: 'recommendations', label: 'Recommandations' },
+    ],
+  },
+  {
+    title: 'Produits & stock',
+    items: [
+      { id: 'catalog', label: 'Mes produits' },
+      { id: 'stock', label: 'Stock' },
+      { id: 'import', label: 'Import CSV' },
+      { id: 'simulator', label: 'Simulateur' },
+      { id: 'compare', label: 'Comparaison' },
+      { id: 'decision', label: 'Garder ou abandonner' },
+    ],
+  },
+  {
+    title: 'Ventes',
+    items: [
+      { id: 'quotes', label: 'Devis' },
+      { id: 'orders', label: 'Bons de commande' },
+      { id: 'deliveries', label: 'Bons de livraison' },
+      { id: 'invoices', label: 'Factures' },
+      { id: 'vat', label: 'Déclaration TVA' },
+    ],
+  },
+  {
+    title: 'Paramètres',
+    items: [{ id: 'company', label: 'Mon entreprise' }],
+  },
+]
+
+export default function Sidebar({ current, onNavigate, badges }: SidebarProps) {
+  return (
+    <aside className="sidebar">
+      <div className="brand">ProfitPilot</div>
+      <nav>
+        {sections.map((section) => (
+          <div key={section.title}>
+            <div
+              style={{
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 1,
+                textTransform: 'uppercase',
+                opacity: 0.6,
+                margin: '16px 0 4px',
+              }}
+            >
+              {section.title}
+            </div>
+            {section.items.map((item) => {
+              const badge = badges?.[item.id]
+              return (
+                <button
+                  key={item.id}
+                  className={item.id === current ? 'nav-item active' : 'nav-item'}
+                  onClick={() => onNavigate(item.id)}
+                >
+                  {item.label}
+                  {!!badge && (
+                    <span
+                      title="Factures en retard"
+                      style={{
+                        marginLeft: 8,
+                        padding: '0 7px',
+                        borderRadius: 999,
+                        fontSize: 12,
+                        background: '#f59e0b',
+                        color: '#111827',
+                      }}
+                    >
+                      {badge}
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+        ))}
+      </nav>
+    </aside>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/components/Sidebar.tsx"
+
+cat > src/components/Dashboard.tsx <<'FIN_DU_FICHIER'
+import type { PageId, Product } from '../types'
+import KpiCard from './KpiCard'
+import {
+  computeProductMetrics,
+  computeTotals,
+  formatEuro,
+  formatPercent,
+} from '../utils/finance'
+import { getStockStatus } from '../utils/stock'
+import type { CommercialDocument } from '../documents/types'
+import { computeTotals as computeDocTotals, formatMAD, round2 } from '../documents/tva'
+import { isOverdue, today } from '../documents/numbering'
+
+interface DashboardProps {
+  products: Product[]
+  /** Devis, BC, BL et factures : alimentent le bloc « Ventes » */
+  documents?: CommercialDocument[]
+  onNavigate?: (page: PageId) => void
+}
+
+function badgeClass(rate: number): string {
+  if (rate >= 40) return 'badge badge-good'
+  if (rate >= 20) return 'badge badge-medium'
+  return 'badge badge-low'
+}
+
+function rateTone(rate: number): 'good' | 'medium' | 'low' {
+  if (rate >= 40) return 'good'
+  if (rate >= 20) return 'medium'
+  return 'low'
+}
+
+/** Synthèse des ventes en dirhams : mois en cours, encours clients, retards, devis ouverts */
+function salesSummary(documents: CommercialDocument[]) {
+  const now = today()
+  const month = now.slice(0, 7)
+  let monthHT = 0
+  let unpaid = 0
+  let late = 0
+  let lateCount = 0
+  let invoiceCount = 0
+  for (const d of documents) {
+    if (d.kind !== 'invoice' || d.status === 'draft' || d.status === 'cancelled') continue
+    invoiceCount++
+    const t = computeDocTotals(d)
+    if (d.date.startsWith(month)) monthHT += t.totalHT
+    if (d.status !== 'paid') unpaid += t.netToPay
+    if (isOverdue(d, now)) {
+      late += t.netToPay
+      lateCount++
+    }
+  }
+  // Devis encore ouverts : non annulés et pas encore transformés en BC ou facture
+  const converted = new Set(documents.map((d) => d.sourceId).filter(Boolean))
+  const openQuotes = documents.filter(
+    (d) => d.kind === 'quote' && d.status !== 'cancelled' && !converted.has(d.id) && d.dueDate >= now,
+  )
+  const quotesHT = openQuotes.reduce((s, d) => s + computeDocTotals(d).totalHT, 0)
+  return {
+    invoiceCount,
+    monthHT: round2(monthHT),
+    unpaid: round2(unpaid),
+    late: round2(late),
+    lateCount,
+    openQuotes: openQuotes.length,
+    quotesHT: round2(quotesHT),
+  }
+}
+
+export default function Dashboard({ products, documents = [], onNavigate }: DashboardProps) {
+  if (products.length === 0) {
+    return (
+      <div className="card">
+        <p className="muted">
+          Aucun produit pour le moment. Ajoute des produits dans « Mes produits » ou importe un fichier CSV.
+        </p>
+      </div>
+    )
+  }
+
+  const totals = computeTotals(products)
+  const rows = products
+    .map(computeProductMetrics)
+    .sort((a, b) => b.margin - a.margin)
+  const maxMargin = Math.max(...rows.map((r) => r.margin), 1)
+
+  const best = rows[0]
+  const weakest = [...rows].sort((a, b) => a.marginRate - b.marginRate)[0]
+  const top3Margin = rows.slice(0, 3).reduce((sum, r) => sum + r.margin, 0)
+  const top3Share = totals.margin > 0 ? (top3Margin / totals.margin) * 100 : 0
+
+  const sales = salesSummary(documents)
+  const stockAlerts = products
+    .map((p) => ({ product: p, status: getStockStatus(p) }))
+    .filter((x) => x.status === 'out' || x.status === 'low')
+    .sort((a, b) => (a.status === b.status ? 0 : a.status === 'out' ? -1 : 1))
+
+  return (
+    <div>
+      <div className="kpi-grid">
+        <KpiCard
+          label="Chiffre d'affaires"
+          value={formatEuro(totals.revenue)}
+          hint={`${products.length} produits`}
+          tone="primary"
+        />
+        <KpiCard label="Coûts variables" value={formatEuro(totals.totalCost)} tone="neutral" />
+        <KpiCard label="Marge brute" value={formatEuro(totals.margin)} tone="good" />
+        <KpiCard
+          label="Taux de marge"
+          value={formatPercent(totals.marginRate)}
+          hint="Marge brute / chiffre d'affaires"
+          tone={rateTone(totals.marginRate)}
+        />
+      </div>
+
+      {(sales.invoiceCount > 0 || sales.openQuotes > 0) && (
+        <>
+          <h2>Ventes</h2>
+          <div className="kpi-grid">
+            <KpiCard label="Facturé ce mois (HT)" value={formatMAD(sales.monthHT)} tone="primary" />
+            <KpiCard
+              label="Reste à encaisser"
+              value={formatMAD(sales.unpaid)}
+              hint={`${sales.invoiceCount} facture(s) émise(s)`}
+              tone="neutral"
+            />
+            <KpiCard
+              label="Factures en retard"
+              value={formatMAD(sales.late)}
+              hint={`${sales.lateCount} facture(s) à relancer`}
+              tone={sales.lateCount > 0 ? 'low' : 'good'}
+            />
+            <KpiCard
+              label="Devis en cours"
+              value={formatMAD(sales.quotesHT)}
+              hint={`${sales.openQuotes} devis à transformer`}
+              tone="medium"
+            />
+          </div>
+        </>
+      )}
+
+      {stockAlerts.length > 0 && (
+        <div className="card">
+          <div className="insight-label">Alertes stock</div>
+          <div className="insight-title">
+            {stockAlerts.filter((x) => x.status === 'out').length} rupture(s),{' '}
+            {stockAlerts.filter((x) => x.status === 'low').length} sous le seuil
+          </div>
+          <ul>
+            {stockAlerts.slice(0, 5).map(({ product, status }) => (
+              <li key={product.id}>
+                <span className={status === 'out' ? 'badge badge-low' : 'badge badge-medium'}>
+                  {status === 'out' ? 'Rupture' : 'Seuil'}
+                </span>{' '}
+                {product.name} : {product.stock ?? 0} en stock
+                {product.minStock ? ` (seuil ${product.minStock})` : ''}
+              </li>
+            ))}
+          </ul>
+          {onNavigate && (
+            <button type="button" onClick={() => onNavigate('stock')}>
+              Voir le stock
+            </button>
+          )}
+        </div>
+      )}
+
+      {rows.length >= 2 && (
+        <div className="insight-grid">
+          <div className="card">
+            <div className="insight-label">Produit le plus rentable</div>
+            <div className="insight-title">{best.product.name}</div>
+            <div className="insight-text">
+              {formatEuro(best.margin)} de marge brute, taux de {formatPercent(best.marginRate)}
+            </div>
+          </div>
+          <div className="card">
+            <div className="insight-label">Taux de marge le plus faible</div>
+            <div className="insight-title">{weakest.product.name}</div>
+            <div className="insight-text">
+              {formatPercent(weakest.marginRate)} de taux de marge pour {formatEuro(weakest.revenue)} de chiffre d'affaires
+            </div>
+          </div>
+          <div className="card">
+            <div className="insight-label">Concentration</div>
+            <div className="insight-title">{formatPercent(top3Share)}</div>
+            <div className="insight-text">
+              de la marge brute vient des {Math.min(3, rows.length)} premiers produits
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="card">
+        <h2>Marge par produit</h2>
+        <table>
+          <thead>
+            <tr>
+              <th>Produit</th>
+              <th>Catégorie</th>
+              <th className="num">CA</th>
+              <th className="num">Marge</th>
+              <th className="num">Taux</th>
+              <th>Contribution</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.product.id}>
+                <td>{r.product.name}</td>
+                <td>{r.product.category}</td>
+                <td className="num">{formatEuro(r.revenue)}</td>
+                <td className="num">{formatEuro(r.margin)}</td>
+                <td className="num">
+                  <span className={badgeClass(r.marginRate)}>{formatPercent(r.marginRate)}</span>
+                </td>
+                <td>
+                  <div className="bar">
+                    <div
+                      className="bar-fill"
+                      style={{ width: `${Math.max((r.margin / maxMargin) * 100, 0)}%` }}
+                    />
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/components/Dashboard.tsx"
+
 cat > src/App.tsx <<'FIN_DU_FICHIER'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { FixedCost, PageId, Product } from './types'
 import { sampleProducts } from './data/sampleProducts'
 import Sidebar from './components/Sidebar'
@@ -1306,8 +1941,10 @@ import Decision from './components/Decision'
 import StockPage from './components/StockPage'
 import DocumentsPage from './documents/DocumentsPage'
 import CompanySettings from './documents/CompanySettings'
+import VatPage from './documents/VatPage'
+import { isOverdue } from './documents/numbering'
 import { useCompany, useDocuments } from './documents/storage'
-import type { DocKind } from './documents/types'
+import type { DocKind, DocLine } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
 import './theme.css'
 
@@ -1326,19 +1963,23 @@ const titles: Record<PageId, string> = {
   recommendations: 'Recommandations',
   compare: 'Comparaison de produits',
   decision: 'Garder ou abandonner un produit',
-  invoices: 'Factures',
+  quotes: 'Devis',
   orders: 'Bons de commande',
   deliveries: 'Bons de livraison',
+  invoices: 'Factures',
+  vat: 'Déclaration de TVA',
   company: 'Mon entreprise',
 }
 
 // Correspondance entre les pages et les types de documents commerciaux
 const docPages: Partial<Record<PageId, DocKind>> = {
+  quotes: 'quote',
   invoices: 'invoice',
   orders: 'order',
   deliveries: 'delivery',
 }
 const pageOfKind: Record<DocKind, PageId> = {
+  quote: 'quotes',
   invoice: 'invoices',
   order: 'orders',
   delivery: 'deliveries',
@@ -1445,6 +2086,22 @@ export default function App() {
     setIsSampleData(false)
   }
 
+  // Validation d'un BL : on retire les quantités livrées du stock (ou on les remet si le BL est annulé)
+  function handleDelivered(lines: DocLine[]) {
+    const qty = new Map<string, number>()
+    for (const l of lines) if (l.productId) qty.set(l.productId, (qty.get(l.productId) ?? 0) + l.quantity)
+    if (qty.size === 0) return
+    const short: string[] = []
+    const next = products.map((p) => {
+      const q = qty.get(p.id)
+      if (!q || p.stock === undefined) return p
+      if (p.stock - q < 0) short.push(`${p.name} (stock ${p.stock}, livré ${q})`)
+      return { ...p, stock: Math.max(0, p.stock - q) }
+    })
+    handleEdit(next)
+    if (short.length) alert('Stock insuffisant, ramené à 0 pour :\n' + short.join('\n'))
+  }
+
   function handleImport(imported: Product[]) {
     setProducts(imported)
     setIsSampleData(false)
@@ -1458,18 +2115,20 @@ export default function App() {
   }
 
   const docKind = docPages[page]
+  // Pages sans sélecteur de devise ni export produits : tout y est en dirhams
+  const salesPage = !!docKind || page === 'vat' || page === 'company'
+  const overdueCount = useMemo(() => documents.filter((d) => isOverdue(d)).length, [documents])
 
   return (
     <div className="layout">
-      <Sidebar current={page} onNavigate={setPage} />
+      <Sidebar current={page} onNavigate={setPage} badges={{ invoices: overdueCount }} />
       <main className="content">
         <p className="print-only">
           ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
           {isSampleData ? ' · données de démonstration' : ''}
         </p>
         <h1>{titles[page]}</h1>
-        {/* Les documents commerciaux sont toujours en dirhams : pas de sélecteur de devise ni d'export produits */}
-        {!docKind && page !== 'company' && (
+        {!salesPage && (
           <>
             <div className="export-bar" style={{ alignItems: 'center' }}>
               <label style={{ fontSize: 14 }}>
@@ -1486,7 +2145,9 @@ export default function App() {
             <ExportBar products={products} />
           </>
         )}
-        {page === 'dashboard' && <Dashboard products={products} />}
+        {page === 'dashboard' && (
+          <Dashboard products={products} documents={documents} onNavigate={setPage} />
+        )}
         {page === 'catalog' && (
           <ProductEditor
             products={products}
@@ -1521,13 +2182,10 @@ export default function App() {
             products={products}
             company={company}
             onNavigate={(k) => setPage(pageOfKind[k])}
-            // Si votre type Product a un champ de stock, décrémentez-le ici à la validation d'un BL :
-            // onDelivered={(lines) => handleEdit(products.map((p) => {
-            //   const qty = lines.filter((l) => l.productId === p.id).reduce((s, l) => s + l.quantity, 0)
-            //   return qty ? { ...p, stock: p.stock - qty } : p
-            // }))}
+            onDelivered={handleDelivered}
           />
         )}
+        {page === 'vat' && <VatPage documents={documents} />}
         {page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
       </main>
     </div>
@@ -1536,4 +2194,10 @@ export default function App() {
 FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
-grep -q "'invoices'" src/types.ts || { cp src/types.ts src/types.ts.bak && sed -i.tmp "s/'decision'/'decision' | 'invoices' | 'orders' | 'deliveries' | 'company'/" src/types.ts && rm -f src/types.ts.tmp; }; grep -n invoices src/types.ts
+# Nouvelles pages dans le type PageId
+cp src/types.ts src/types.ts.bak
+grep -q "'invoices'" src/types.ts || sed -i.tmp "s/'decision'/'decision' | 'invoices' | 'orders' | 'deliveries' | 'company'/" src/types.ts
+grep -q "'quotes'" src/types.ts || sed -i.tmp "s/'deliveries'/'deliveries' | 'quotes' | 'vat'/" src/types.ts
+rm -f src/types.ts.tmp
+grep -n "'quotes'" src/types.ts
+echo "Installation terminée. Lancez : npm run dev"

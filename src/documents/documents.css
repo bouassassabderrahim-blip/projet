@@ -168,3 +168,6 @@
 	}
 	.no-print { display: none !important; }
 }
+
+.doc-badge-late { background: #fef3c7; color: #92400e; margin-left: 4px; }
+.doc-stats .doc-stat-late { border-color: #f5c26b; background: #fffbeb; }

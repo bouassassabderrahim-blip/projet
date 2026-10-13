@@ -2,7 +2,8 @@ import { useMemo, useState } from 'react'
 import type { Product } from '../types'
 import DocumentEditor from './DocumentEditor'
 import DocumentPrint from './DocumentPrint'
-import { addDays, emptyLine, newId, nextNumber, today } from './numbering'
+import { downloadCsv, salesJournal } from './csv'
+import { addDays, emptyLine, isOverdue, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
 	DOC_LABELS,
@@ -25,14 +26,15 @@ interface Props {
 	company: CompanyInfo
 	/** Aller vers la page d'un autre type de document (après une conversion) */
 	onNavigate?: (kind: DocKind) => void
-	/** Appelé quand un BL est validé : utile pour décrémenter le stock */
+	/** Appelé quand un BL est validé (quantités positives) ou annulé (quantités négatives) */
 	onDelivered?: (lines: DocLine[]) => void
 }
 
 type View = { mode: 'list' } | { mode: 'edit'; doc: CommercialDocument } | { mode: 'print'; id: string }
 
-/** Chaîne commerciale : BC → BL → Facture */
+/** Chaîne commerciale : Devis → BC → BL → Facture */
 const CONVERSIONS: Record<DocKind, DocKind[]> = {
+	quote: ['order', 'invoice'],
 	order: ['delivery', 'invoice'],
 	delivery: ['invoice'],
 	invoice: [],
@@ -68,20 +70,27 @@ export default function DocumentsPage({
 		return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
 	}, [documents])
 
-	// Indicateurs pour les factures (hors annulées)
+	// Indicateurs pour les factures validées ou payées
 	const stats = useMemo(() => {
 		if (kind !== 'invoice') return null
+		const now = today()
 		let ht = 0
 		let tva = 0
 		let unpaid = 0
+		let late = 0
+		let lateCount = 0
 		for (const d of documents) {
 			if (d.kind !== 'invoice' || d.status === 'cancelled' || d.status === 'draft') continue
 			const t = computeTotals(d)
 			ht += t.totalHT
 			tva += t.totalTVA
 			if (d.status !== 'paid') unpaid += t.netToPay
+			if (isOverdue(d, now)) {
+				late += t.netToPay
+				lateCount++
+			}
 		}
-		return { ht: round2(ht), tva: round2(tva), unpaid: round2(unpaid) }
+		return { ht: round2(ht), tva: round2(tva), unpaid: round2(unpaid), late: round2(late), lateCount }
 	}, [documents, kind])
 
 	function createDoc(): CommercialDocument {
@@ -91,7 +100,8 @@ export default function DocumentsPage({
 			kind,
 			number: nextNumber(kind, documents, date),
 			date,
-			dueDate: addDays(date, 60), // délai légal par défaut au Maroc : 60 jours
+			// Facture : délai légal de paiement par défaut de 60 jours ; devis : validité de 30 jours
+			dueDate: addDays(date, kind === 'quote' ? 30 : 60),
 			party: emptyParty(),
 			lines: [emptyLine()],
 			status: 'draft',
@@ -107,8 +117,26 @@ export default function DocumentsPage({
 	}
 
 	function setStatus(doc: CommercialDocument, status: DocStatus) {
-		onChange(documents.map((d) => (d.id === doc.id ? { ...d, status } : d)))
-		if (status === 'validated' && doc.kind === 'delivery') onDelivered?.(doc.lines)
+		let paidDate: string | undefined
+		if (status === 'paid') {
+			// La date d'encaissement sert à la déclaration de TVA (régime des encaissements)
+			const answer = prompt("Date d'encaissement (AAAA-MM-JJ)", today())
+			if (answer === null) return
+			if (!/^\d{4}-\d{2}-\d{2}$/.test(answer.trim())) return alert('Date invalide : utilisez le format AAAA-MM-JJ.')
+			paidDate = answer.trim()
+		}
+		onChange(documents.map((d) => (d.id === doc.id ? { ...d, status, paidDate } : d)))
+		if (doc.kind === 'delivery' && status === 'validated') onDelivered?.(doc.lines)
+		// Annuler un BL déjà validé remet les quantités en stock
+		if (doc.kind === 'delivery' && status === 'cancelled' && doc.status === 'validated')
+			onDelivered?.(doc.lines.map((l) => ({ ...l, quantity: -l.quantity })))
+	}
+
+	function exportJournal() {
+		const invoices = documents
+			.filter((d) => d.kind === 'invoice' && d.status !== 'draft')
+			.sort((a, b) => a.number.localeCompare(b.number))
+		downloadCsv(`journal-ventes-${today()}.csv`, salesJournal(invoices))
 	}
 
 	function remove(doc: CommercialDocument) {
@@ -125,8 +153,9 @@ export default function DocumentsPage({
 				id: newId(),
 				number: nextNumber(kind, documents, date),
 				date,
-				dueDate: addDays(date, 60),
+				dueDate: addDays(date, kind === 'quote' ? 30 : 60),
 				status: 'draft',
+				paidDate: undefined,
 				sourceId: undefined,
 				sourceNumber: undefined,
 				lines: doc.lines.map((l) => ({ ...l, id: newId() })),
@@ -142,8 +171,9 @@ export default function DocumentsPage({
 			kind: to,
 			number: nextNumber(to, documents, date),
 			date,
-			dueDate: addDays(date, 60),
+			dueDate: addDays(date, to === 'quote' ? 30 : 60),
 			status: 'draft',
+			paidDate: undefined,
 			sourceId: doc.id,
 			sourceNumber: doc.number,
 			lines: doc.lines.map((l) => ({ ...l, id: newId() })),
@@ -192,6 +222,10 @@ export default function DocumentsPage({
 						<span>Reste à encaisser</span>
 						<strong>{formatMAD(stats.unpaid)}</strong>
 					</div>
+					<div className={stats.lateCount ? 'doc-stat-late' : undefined}>
+						<span>En retard ({stats.lateCount})</span>
+						<strong>{formatMAD(stats.late)}</strong>
+					</div>
 				</div>
 			)}
 
@@ -208,8 +242,13 @@ export default function DocumentsPage({
 
 			<div className="export-bar">
 				<button type="button" onClick={() => setView({ mode: 'edit', doc: createDoc() })}>
-					+ Nouveau {labels.title.toLowerCase()}
+					+ {labels.newLabel}
 				</button>
+				{kind === 'invoice' && (
+					<button type="button" onClick={exportJournal}>
+						Exporter le journal des ventes (CSV)
+					</button>
+				)}
 				<input placeholder="Rechercher (n°, client)" value={search} onChange={(e) => setSearch(e.target.value)} />
 				<select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value as DocStatus | '')}>
 					<option value="">Tous les statuts</option>
@@ -246,6 +285,7 @@ export default function DocumentsPage({
 									<td className="num">{formatMAD(t.netToPay)}</td>
 									<td>
 										<span className={`doc-badge doc-badge-${d.status}`}>{STATUS_LABELS[d.status]}</span>
+										{isOverdue(d) && <span className="doc-badge doc-badge-late">En retard</span>}
 									</td>
 									<td className="doc-actions">
 										<button type="button" onClick={() => setView({ mode: 'print', id: d.id })}>

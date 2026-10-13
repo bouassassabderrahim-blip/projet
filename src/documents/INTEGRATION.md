@@ -1,32 +1,20 @@
-# Module Facturation / BC / BL (TVA Maroc)
+# Module Ventes : devis, BC, BL, factures, TVA Maroc
 
-## 1. Copier les fichiers
-Copiez le dossier `src/documents/` dans votre projet et remplacez `src/App.tsx`.
-
-## 2. Étendre `PageId` dans `src/types.ts`
-```ts
-export type PageId =
-	| 'dashboard' | 'catalog' | 'stock' | 'products' | 'breakeven' | 'import'
-	| 'simulator' | 'recommendations' | 'compare' | 'decision'
-	| 'invoices' | 'orders' | 'deliveries' | 'company'
+## Installation
+À la racine du projet :
+```bash
+curl -fsSL https://raw.githubusercontent.com/bouassassabderrahim-blip/projet/claude/profitpilot-app-setup-2timay/installer-documents.sh | bash
 ```
+Le script sauvegarde `App.tsx`, `Sidebar.tsx`, `Dashboard.tsx` et `types.ts` en `.bak`, puis ajoute
+`'invoices' | 'orders' | 'deliveries' | 'company' | 'quotes' | 'vat'` au type `PageId`.
 
-## 3. Ajouter les entrées dans `Sidebar`
-Ajoutez à la liste de liens de votre `Sidebar` :
-```ts
-{ id: 'orders', label: 'Bons de commande' },
-{ id: 'deliveries', label: 'Bons de livraison' },
-{ id: 'invoices', label: 'Factures' },
-{ id: 'company', label: 'Mon entreprise' },
-```
-
-## Fonctionnement
-- Chaîne commerciale : BC → BL → Facture (bouton « → Bon de livraison », « → Facture »).
-- Numérotation continue par année : `BC-2026-0001`, `BL-2026-0001`, `FA-2026-0001`.
-- TVA marocaine : 20 %, 14 %, 10 %, 7 %, exonéré ; récapitulatif par taux.
-- Droit de timbre de 0,25 % ajouté automatiquement aux factures payées en espèces.
-- Montant en lettres en dirhams (« Arrêtée la présente facture à la somme de … »).
-- Mentions légales : ICE (15 chiffres, obligatoire sur facture), IF, RC, Patente, CNSS, RIB.
-- Un document validé n'est plus modifiable : utilisez « Annuler » puis « Dupliquer ».
-- Le BL s'imprime sans prix, avec cadres de signature.
-- Prix produits : `unitPrice` est considéré comme un prix **HT**.
+## Fonctionnalités
+- Chaîne commerciale : Devis → BC → BL → Facture, numérotation DV/BC/BL/FA-AAAA-0001.
+- TVA marocaine 20/14/10/7 % et exonéré, récapitulatif par taux, montant en lettres en dirhams.
+- Droit de timbre 0,25 % sur les factures payées en espèces.
+- Factures en retard (échéance dépassée) signalées dans la liste, le menu et le tableau de bord.
+- Date d'encaissement saisie au passage en « Payée ».
+- Déclaration de TVA : TVA collectée par mois ou trimestre, régime des encaissements ou des débits, export CSV.
+- Journal des ventes exportable en CSV pour le comptable.
+- Validation d'un BL : les quantités livrées sont retirées du stock (et remises si le BL est annulé).
+- Tableau de bord : bloc Ventes (facturé du mois, encours, retards, devis en cours) et alertes stock.

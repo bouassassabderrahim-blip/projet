@@ -40,6 +40,7 @@ export default function DocumentPrint({ doc, company, onClose }: Props) {
 						<div>N° {doc.number}</div>
 						<div>Date : {frDate(doc.date)}</div>
 						{doc.kind === 'invoice' && doc.dueDate && <div>Échéance : {frDate(doc.dueDate)}</div>}
+						{doc.kind === 'quote' && doc.dueDate && <div>Valable jusqu'au : {frDate(doc.dueDate)}</div>}
 						{doc.sourceNumber && <div>Réf. : {doc.sourceNumber}</div>}
 					</div>
 				</header>
@@ -135,7 +136,7 @@ export default function DocumentPrint({ doc, company, onClose }: Props) {
 
 				{doc.kind !== 'invoice' && (
 					<div className="doc-signatures">
-						<div>{doc.kind === 'delivery' ? 'Signature du livreur' : 'Cachet et signature du fournisseur'}</div>
+						<div>{doc.kind === 'delivery' ? 'Signature du livreur' : "Cachet et signature de l'entreprise"}</div>
 						<div>{doc.kind === 'delivery' ? 'Reçu conforme : cachet et signature du client' : 'Bon pour accord : cachet et signature du client'}</div>
 					</div>
 				)}

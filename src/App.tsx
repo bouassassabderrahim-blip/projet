@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { FixedCost, PageId, Product } from './types'
 import { sampleProducts } from './data/sampleProducts'
 import Sidebar from './components/Sidebar'
@@ -15,8 +15,10 @@ import Decision from './components/Decision'
 import StockPage from './components/StockPage'
 import DocumentsPage from './documents/DocumentsPage'
 import CompanySettings from './documents/CompanySettings'
+import VatPage from './documents/VatPage'
+import { isOverdue } from './documents/numbering'
 import { useCompany, useDocuments } from './documents/storage'
-import type { DocKind } from './documents/types'
+import type { DocKind, DocLine } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
 import './theme.css'
 
@@ -35,19 +37,23 @@ const titles: Record<PageId, string> = {
 	recommendations: 'Recommandations',
 	compare: 'Comparaison de produits',
 	decision: 'Garder ou abandonner un produit',
-	invoices: 'Factures',
+	quotes: 'Devis',
 	orders: 'Bons de commande',
 	deliveries: 'Bons de livraison',
+	invoices: 'Factures',
+	vat: 'Déclaration de TVA',
 	company: 'Mon entreprise',
 }
 
 // Correspondance entre les pages et les types de documents commerciaux
 const docPages: Partial<Record<PageId, DocKind>> = {
+	quotes: 'quote',
 	invoices: 'invoice',
 	orders: 'order',
 	deliveries: 'delivery',
 }
 const pageOfKind: Record<DocKind, PageId> = {
+	quote: 'quotes',
 	invoice: 'invoices',
 	order: 'orders',
 	delivery: 'deliveries',
@@ -154,6 +160,22 @@ export default function App() {
 		setIsSampleData(false)
 	}
 
+	// Validation d'un BL : on retire les quantités livrées du stock (ou on les remet si le BL est annulé)
+	function handleDelivered(lines: DocLine[]) {
+		const qty = new Map<string, number>()
+		for (const l of lines) if (l.productId) qty.set(l.productId, (qty.get(l.productId) ?? 0) + l.quantity)
+		if (qty.size === 0) return
+		const short: string[] = []
+		const next = products.map((p) => {
+			const q = qty.get(p.id)
+			if (!q || p.stock === undefined) return p
+			if (p.stock - q < 0) short.push(`${p.name} (stock ${p.stock}, livré ${q})`)
+			return { ...p, stock: Math.max(0, p.stock - q) }
+		})
+		handleEdit(next)
+		if (short.length) alert('Stock insuffisant, ramené à 0 pour :\n' + short.join('\n'))
+	}
+
 	function handleImport(imported: Product[]) {
 		setProducts(imported)
 		setIsSampleData(false)
@@ -167,18 +189,20 @@ export default function App() {
 	}
 
 	const docKind = docPages[page]
+	// Pages sans sélecteur de devise ni export produits : tout y est en dirhams
+	const salesPage = !!docKind || page === 'vat' || page === 'company'
+	const overdueCount = useMemo(() => documents.filter((d) => isOverdue(d)).length, [documents])
 
 	return (
 		<div className="layout">
-			<Sidebar current={page} onNavigate={setPage} />
+			<Sidebar current={page} onNavigate={setPage} badges={{ invoices: overdueCount }} />
 			<main className="content">
 				<p className="print-only">
 					ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
 					{isSampleData ? ' · données de démonstration' : ''}
 				</p>
 				<h1>{titles[page]}</h1>
-				{/* Les documents commerciaux sont toujours en dirhams : pas de sélecteur de devise ni d'export produits */}
-				{!docKind && page !== 'company' && (
+				{!salesPage && (
 					<>
 						<div className="export-bar" style={{ alignItems: 'center' }}>
 							<label style={{ fontSize: 14 }}>
@@ -195,7 +219,9 @@ export default function App() {
 						<ExportBar products={products} />
 					</>
 				)}
-				{page === 'dashboard' && <Dashboard products={products} />}
+				{page === 'dashboard' && (
+					<Dashboard products={products} documents={documents} onNavigate={setPage} />
+				)}
 				{page === 'catalog' && (
 					<ProductEditor
 						products={products}
@@ -230,13 +256,10 @@ export default function App() {
 						products={products}
 						company={company}
 						onNavigate={(k) => setPage(pageOfKind[k])}
-						// Si votre type Product a un champ de stock, décrémentez-le ici à la validation d'un BL :
-						// onDelivered={(lines) => handleEdit(products.map((p) => {
-						// 	const qty = lines.filter((l) => l.productId === p.id).reduce((s, l) => s + l.quantity, 0)
-						// 	return qty ? { ...p, stock: p.stock - qty } : p
-						// }))}
+						onDelivered={handleDelivered}
 					/>
 				)}
+				{page === 'vat' && <VatPage documents={documents} />}
 				{page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
 			</main>
 		</div>

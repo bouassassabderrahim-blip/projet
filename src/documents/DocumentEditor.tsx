@@ -81,12 +81,14 @@ export default function DocumentEditor({ initial, products, knownParties, onSave
 					Date{' '}
 					<input type="date" value={doc.date} onChange={(e) => update({ date: e.target.value })} />
 				</label>
+				{(isInvoice || doc.kind === 'quote') && (
+					<label>
+						{isInvoice ? 'Échéance' : "Valable jusqu'au"}{' '}
+						<input type="date" value={doc.dueDate} onChange={(e) => update({ dueDate: e.target.value })} />
+					</label>
+				)}
 				{isInvoice && (
 					<>
-						<label>
-							Échéance{' '}
-							<input type="date" value={doc.dueDate} onChange={(e) => update({ dueDate: e.target.value })} />
-						</label>
 						<label>
 							Mode de paiement{' '}
 							<select
