@@ -1,5 +1,6 @@
-import { computeTotals } from './tva'
-import { PAYMENT_LABELS, STATUS_LABELS, type CommercialDocument } from './types'
+import { balanceOf, paidAmount, sign } from './ledger'
+import { computeTotals, round2 } from './tva'
+import { DOC_LABELS, PAYMENT_LABELS, STATUS_LABELS, type CommercialDocument } from './types'
 
 type Cell = string | number
 
@@ -12,8 +13,8 @@ export function toCsv(rows: Cell[][]): string {
 	return '﻿' + rows.map((r) => r.map(cell).join(';')).join('\r\n')
 }
 
-export function downloadCsv(filename: string, rows: Cell[][]) {
-	const url = URL.createObjectURL(new Blob([toCsv(rows)], { type: 'text/csv;charset=utf-8' }))
+export function downloadFile(filename: string, content: string, type: string) {
+	const url = URL.createObjectURL(new Blob([content], { type }))
 	const a = document.createElement('a')
 	a.href = url
 	a.download = filename
@@ -21,29 +22,39 @@ export function downloadCsv(filename: string, rows: Cell[][]) {
 	URL.revokeObjectURL(url)
 }
 
-/** Journal des ventes pour le comptable : une ligne par facture, TVA ventilée par taux */
-export function salesJournal(invoices: CommercialDocument[]): Cell[][] {
+export function downloadCsv(filename: string, rows: Cell[][]) {
+	downloadFile(filename, toCsv(rows), 'text/csv;charset=utf-8')
+}
+
+/**
+ * Journal pour le comptable : une ligne par pièce, TVA ventilée par taux.
+ * Les avoirs sont en négatif.
+ */
+export function journal(docs: CommercialDocument[], all: CommercialDocument[]): Cell[][] {
 	const rates = [20, 14, 10, 7, 0] as const
-	const header: Cell[] = ['N°', 'Date', 'Client', 'ICE client', 'Total HT']
+	const header: Cell[] = ['Type', 'N°', 'Réf. fournisseur', 'Date', 'Tiers', 'ICE', 'Total HT']
 	for (const r of rates) header.push(`Base ${r} %`, `TVA ${r} %`)
-	header.push('Total TVA', 'Total TTC', 'Droit de timbre', 'Net à payer', 'Paiement', 'Statut', 'Payée le')
+	header.push('Total TVA', 'Total TTC', 'Droit de timbre', 'Net', 'Réglé', 'Reste dû', 'Paiement', 'Statut', 'Pièce d\'origine')
 
 	const rows: Cell[][] = [header]
-	for (const d of invoices) {
+	for (const d of docs) {
 		const t = computeTotals(d)
-		const row: Cell[] = [d.number, d.date, d.party.name, d.party.ice, t.totalHT]
+		const k = sign(d)
+		const row: Cell[] = [DOC_LABELS[d.kind].title, d.number, d.supplierRef ?? '', d.date, d.party.name, d.party.ice, k * t.totalHT]
 		for (const r of rates) {
 			const b = t.byRate.find((x) => x.rate === r)
-			row.push(b?.base ?? 0, b?.tva ?? 0)
+			row.push(k * (b?.base ?? 0), k * (b?.tva ?? 0))
 		}
 		row.push(
-			t.totalTVA,
-			t.totalTTC,
-			t.stampDuty,
-			t.netToPay,
+			k * t.totalTVA,
+			k * t.totalTTC,
+			k * t.stampDuty,
+			k * t.netToPay,
+			paidAmount(d),
+			d.kind === 'credit' ? 0 : round2(balanceOf(d, all)),
 			PAYMENT_LABELS[d.paymentMethod],
 			STATUS_LABELS[d.status],
-			d.paidDate ?? '',
+			d.sourceNumber ?? '',
 		)
 		rows.push(row)
 	}

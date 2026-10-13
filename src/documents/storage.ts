@@ -1,8 +1,12 @@
 import { useEffect, useState } from 'react'
-import { emptyCompany, type CommercialDocument, type CompanyInfo } from './types'
+import { emptyCompany, type CommercialDocument, type CompanyInfo, type Kit, type PartyRecord, type StockLot } from './types'
 
 export const DOCS_KEY = 'profitpilot:documents:v1'
 export const COMPANY_KEY = 'profitpilot:company:v1'
+export const LOTS_KEY = 'profitpilot:lots:v1'
+export const KITS_KEY = 'profitpilot:kits:v1'
+export const PARTIES_KEY = 'profitpilot:parties:v1'
+export const LAST_BACKUP_KEY = 'profitpilot:last-backup'
 
 /** État React sauvegardé dans le localStorage, avec validation à la relecture */
 export function usePersistentState<T>(key: string, fallback: () => T, isValid: (x: unknown) => x is T) {
@@ -30,30 +34,77 @@ export function usePersistentState<T>(key: string, fallback: () => T, isValid: (
 	return [value, setValue] as const
 }
 
+const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null
+
+const KINDS = ['quote', 'order', 'delivery', 'invoice', 'credit', 'purchase', 'receipt', 'bill']
+
 function isDocument(x: unknown): x is CommercialDocument {
-	if (typeof x !== 'object' || x === null) return false
-	const d = x as Record<string, unknown>
 	return (
-		typeof d.id === 'string' &&
-		(d.kind === 'quote' || d.kind === 'order' || d.kind === 'delivery' || d.kind === 'invoice') &&
-		typeof d.number === 'string' &&
-		typeof d.date === 'string' &&
-		typeof d.party === 'object' &&
-		d.party !== null &&
-		Array.isArray(d.lines)
+		isObj(x) &&
+		typeof x.id === 'string' &&
+		KINDS.includes(x.kind as string) &&
+		typeof x.number === 'string' &&
+		typeof x.date === 'string' &&
+		isObj(x.party) &&
+		Array.isArray(x.lines)
 	)
 }
 
-export const isDocumentList = (x: unknown): x is CommercialDocument[] =>
-	Array.isArray(x) && x.every(isDocument)
+const listOf =
+	<T,>(check: (x: unknown) => boolean) =>
+	(x: unknown): x is T[] =>
+		Array.isArray(x) && x.every(check)
 
-export const isCompany = (x: unknown): x is CompanyInfo =>
-	typeof x === 'object' && x !== null && typeof (x as Record<string, unknown>).name === 'string'
+export const isDocumentList = listOf<CommercialDocument>(isDocument)
 
-export function useDocuments() {
-	return usePersistentState<CommercialDocument[]>(DOCS_KEY, () => [], isDocumentList)
+export const isCompany = (x: unknown): x is CompanyInfo => isObj(x) && typeof x.name === 'string'
+
+const isLotList = listOf<StockLot>(
+	(x) => isObj(x) && typeof x.id === 'string' && typeof x.productId === 'string' && typeof x.quantity === 'number',
+)
+const isKitList = listOf<Kit>((x) => isObj(x) && typeof x.id === 'string' && Array.isArray(x.items))
+const isPartyList = listOf<PartyRecord>(
+	(x) => isObj(x) && typeof x.id === 'string' && typeof x.name === 'string' && (x.role === 'client' || x.role === 'supplier'),
+)
+
+export const useDocuments = () => usePersistentState<CommercialDocument[]>(DOCS_KEY, () => [], isDocumentList)
+export const useCompany = () => usePersistentState<CompanyInfo>(COMPANY_KEY, emptyCompany, isCompany)
+export const useLots = () => usePersistentState<StockLot[]>(LOTS_KEY, () => [], isLotList)
+export const useKits = () => usePersistentState<Kit[]>(KITS_KEY, () => [], isKitList)
+export const useParties = () => usePersistentState<PartyRecord[]>(PARTIES_KEY, () => [], isPartyList)
+
+// ---------- Sauvegarde complète ----------
+
+export interface BackupFile {
+	app: 'profitpilot'
+	version: 1
+	createdAt: string
+	data: Record<string, string>
 }
 
-export function useCompany() {
-	return usePersistentState<CompanyInfo>(COMPANY_KEY, emptyCompany, isCompany)
+/** Toutes les données de l'application (clés profitpilot:*) */
+export function createBackup(): BackupFile {
+	const data: Record<string, string> = {}
+	for (let i = 0; i < localStorage.length; i++) {
+		const key = localStorage.key(i)
+		if (key && key.startsWith('profitpilot:') && key !== LAST_BACKUP_KEY) data[key] = localStorage.getItem(key) ?? ''
+	}
+	return { app: 'profitpilot', version: 1, createdAt: new Date().toISOString(), data }
+}
+
+export function isBackupFile(x: unknown): x is BackupFile {
+	return isObj(x) && x.app === 'profitpilot' && isObj(x.data)
+}
+
+/** Remplace toutes les données par celles de la sauvegarde */
+export function restoreBackup(backup: BackupFile) {
+	const old: string[] = []
+	for (let i = 0; i < localStorage.length; i++) {
+		const key = localStorage.key(i)
+		if (key && key.startsWith('profitpilot:') && key !== LAST_BACKUP_KEY) old.push(key)
+	}
+	for (const key of old) localStorage.removeItem(key)
+	for (const [key, value] of Object.entries(backup.data)) {
+		if (key.startsWith('profitpilot:') && typeof value === 'string') localStorage.setItem(key, value)
+	}
 }

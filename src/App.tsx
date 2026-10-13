@@ -16,11 +16,19 @@ import StockPage from './components/StockPage'
 import DocumentsPage from './documents/DocumentsPage'
 import CompanySettings from './documents/CompanySettings'
 import VatPage from './documents/VatPage'
-import { isOverdue } from './documents/numbering'
-import { useCompany, useDocuments } from './documents/storage'
+import DepotPage from './documents/DepotPage'
+import LotsPage from './documents/LotsPage'
+import KitsPage from './documents/KitsPage'
+import PartiesPage from './documents/PartiesPage'
+import BackupPage from './documents/BackupPage'
+import { isOverdue } from './documents/ledger'
+import { applyMove, expiryState } from './documents/stockMoves'
+import { useCompany, useDocuments, useKits, useLots, useParties } from './documents/storage'
 import type { DocKind, DocLine } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
 import './theme.css'
+import './documents/documents.css'
+import './pro-theme.css'
 
 const STORAGE_KEY = 'profitpilot:v1'
 const FIXED_KEY = 'profitpilot:fixed:v1'
@@ -37,27 +45,58 @@ const titles: Record<PageId, string> = {
 	recommendations: 'Recommandations',
 	compare: 'Comparaison de produits',
 	decision: 'Garder ou abandonner un produit',
-	quotes: 'Devis',
-	orders: 'Bons de commande',
+	quotes: 'Devis clients',
+	orders: 'Bons de commande clients',
 	deliveries: 'Bons de livraison',
-	invoices: 'Factures',
+	depots: 'Dépôts cliniques',
+	invoices: 'Factures clients',
+	credits: 'Avoirs clients',
+	clients: 'Fichier clients',
+	purchases: 'Commandes fournisseurs',
+	receipts: 'Bons de réception',
+	bills: 'Factures fournisseurs',
+	suppliers: 'Fichier fournisseurs',
+	lots: 'Lots, péremptions & traçabilité',
+	kits: 'Kits',
 	vat: 'Déclaration de TVA',
 	company: 'Mon entreprise',
+	backup: 'Sauvegarde des données',
 }
 
-// Correspondance entre les pages et les types de documents commerciaux
+// Correspondance entre les pages et les types de pièces commerciales
 const docPages: Partial<Record<PageId, DocKind>> = {
 	quotes: 'quote',
-	invoices: 'invoice',
 	orders: 'order',
 	deliveries: 'delivery',
+	invoices: 'invoice',
+	credits: 'credit',
+	purchases: 'purchase',
+	receipts: 'receipt',
+	bills: 'bill',
 }
 const pageOfKind: Record<DocKind, PageId> = {
 	quote: 'quotes',
-	invoice: 'invoices',
 	order: 'orders',
 	delivery: 'deliveries',
+	invoice: 'invoices',
+	credit: 'credits',
+	purchase: 'purchases',
+	receipt: 'receipts',
+	bill: 'bills',
 }
+
+// Écrans de gestion commerciale : montants en dirhams, sans sélecteur de devise ni export produits
+const commercialPages = new Set<PageId>([
+	...Object.keys(docPages),
+	'depots',
+	'clients',
+	'suppliers',
+	'lots',
+	'kits',
+	'vat',
+	'company',
+	'backup',
+] as PageId[])
 
 function isProduct(x: unknown): x is Product {
 	if (typeof x !== 'object' || x === null) return false
@@ -117,6 +156,8 @@ function loadCurrency(): string {
 export default function App() {
 	const [initial] = useState(loadSaved)
 	const [page, setPage] = useState<PageId>('dashboard')
+	// Pièce à ouvrir directement en arrivant sur une page (après une conversion ou une facturation de dépôt)
+	const [openId, setOpenId] = useState<string | undefined>()
 	const [products, setProducts] = useState<Product[]>(initial?.products ?? sampleProducts)
 	const [isSampleData, setIsSampleData] = useState(initial?.isSampleData ?? true)
 	const [fixedCosts, setFixedCosts] = useState<FixedCost[]>(loadFixedCosts)
@@ -128,6 +169,9 @@ export default function App() {
 	})
 	const [documents, setDocuments] = useDocuments()
 	const [company, setCompany] = useCompany()
+	const [lots, setLots] = useLots()
+	const [kits, setKits] = useKits()
+	const [parties, setParties] = useParties()
 
 	useEffect(() => {
 		try {
@@ -155,54 +199,65 @@ export default function App() {
 		}
 	}
 
+	function navigate(next: PageId) {
+		setOpenId(undefined)
+		setPage(next)
+	}
+
+	function openDocument(kind: DocKind, id?: string) {
+		setOpenId(id)
+		setPage(pageOfKind[kind])
+	}
+
 	function handleEdit(next: Product[]) {
 		setProducts(next)
 		setIsSampleData(false)
 	}
 
-	// Validation d'un BL : on retire les quantités livrées du stock (ou on les remet si le BL est annulé)
-	function handleDelivered(lines: DocLine[]) {
-		const qty = new Map<string, number>()
-		for (const l of lines) if (l.productId) qty.set(l.productId, (qty.get(l.productId) ?? 0) + l.quantity)
-		if (qty.size === 0) return
-		const short: string[] = []
-		const next = products.map((p) => {
-			const q = qty.get(p.id)
-			if (!q || p.stock === undefined) return p
-			if (p.stock - q < 0) short.push(`${p.name} (stock ${p.stock}, livré ${q})`)
-			return { ...p, stock: Math.max(0, p.stock - q) }
-		})
-		handleEdit(next)
-		if (short.length) alert('Stock insuffisant, ramené à 0 pour :\n' + short.join('\n'))
+	// BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
+	function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string) {
+		const result = applyMove({ products, lots }, lines, direction, supplier)
+		handleEdit(result.products)
+		setLots(result.lots)
+		if (result.shortages.length) alert('Stock insuffisant, ramené à 0 pour :\n' + result.shortages.join('\n'))
 	}
 
 	function handleImport(imported: Product[]) {
 		setProducts(imported)
 		setIsSampleData(false)
-		setPage('dashboard')
+		navigate('dashboard')
 	}
 
 	function handleResetSample() {
 		setProducts(sampleProducts)
 		setIsSampleData(true)
-		setPage('dashboard')
+		navigate('dashboard')
 	}
 
 	const docKind = docPages[page]
-	// Pages sans sélecteur de devise ni export produits : tout y est en dirhams
-	const salesPage = !!docKind || page === 'vat' || page === 'company'
-	const overdueCount = useMemo(() => documents.filter((d) => isOverdue(d)).length, [documents])
+	const badges = useMemo(() => {
+		const overdue = (kind: DocKind) => documents.filter((d) => d.kind === kind && isOverdue(d, documents)).length
+		return {
+			invoices: overdue('invoice'),
+			bills: overdue('bill'),
+			lots: lots.filter((l) => l.quantity > 0 && ['expired', 'soon'].includes(expiryState(l.expiry))).length,
+			depots: documents.reduce(
+				(n, d) => n + (d.consignment && d.status === 'validated' ? d.lines.filter((l) => l.depot === 'depot').length : 0),
+				0,
+			),
+		}
+	}, [documents, lots])
 
 	return (
 		<div className="layout">
-			<Sidebar current={page} onNavigate={setPage} badges={{ invoices: overdueCount }} />
+			<Sidebar current={page} onNavigate={navigate} badges={badges} />
 			<main className="content">
 				<p className="print-only">
 					ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
 					{isSampleData ? ' · données de démonstration' : ''}
 				</p>
 				<h1>{titles[page]}</h1>
-				{!salesPage && (
+				{!commercialPages.has(page) && (
 					<>
 						<div className="export-bar" style={{ alignItems: 'center' }}>
 							<label style={{ fontSize: 14 }}>
@@ -220,7 +275,7 @@ export default function App() {
 					</>
 				)}
 				{page === 'dashboard' && (
-					<Dashboard products={products} documents={documents} onNavigate={setPage} />
+					<Dashboard products={products} documents={documents} lots={lots} onNavigate={navigate} />
 				)}
 				{page === 'catalog' && (
 					<ProductEditor
@@ -249,18 +304,40 @@ export default function App() {
 				{page === 'decision' && <Decision products={products} />}
 				{docKind && (
 					<DocumentsPage
-						key={docKind} // réinitialise la vue (liste) en changeant de page
+						key={docKind + (openId ?? '')} // réinitialise la vue en changeant de page
 						kind={docKind}
 						documents={documents}
 						onChange={setDocuments}
 						products={products}
+						lots={lots}
+						kits={kits}
+						parties={parties}
+						onPartiesChange={setParties}
 						company={company}
-						onNavigate={(k) => setPage(pageOfKind[k])}
-						onDelivered={handleDelivered}
+						openId={openId}
+						onNavigate={openDocument}
+						onStockMove={handleStockMove}
 					/>
 				)}
+				{page === 'depots' && (
+					<DepotPage
+						documents={documents}
+						onChange={setDocuments}
+						onNavigate={openDocument}
+						onStockMove={handleStockMove}
+					/>
+				)}
+				{page === 'clients' && (
+					<PartiesPage role="client" parties={parties} onChange={setParties} documents={documents} company={company} />
+				)}
+				{page === 'suppliers' && (
+					<PartiesPage role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} />
+				)}
+				{page === 'lots' && <LotsPage lots={lots} onChange={setLots} products={products} documents={documents} />}
+				{page === 'kits' && <KitsPage kits={kits} onChange={setKits} products={products} />}
 				{page === 'vat' && <VatPage documents={documents} />}
 				{page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
+				{page === 'backup' && <BackupPage />}
 			</main>
 		</div>
 	)

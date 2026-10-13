@@ -3,7 +3,7 @@ import type { PageId } from '../types'
 interface SidebarProps {
   current: PageId
   onNavigate: (page: PageId) => void
-  /** Petit compteur affiché à côté d'une page (ex. factures en retard) */
+  /** Compteurs d'alertes affichés à côté des pages (factures échues, lots périmés…) */
   badges?: Partial<Record<PageId, number>>
 }
 
@@ -18,14 +18,13 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
     ],
   },
   {
-    title: 'Produits & stock',
+    title: 'Articles & stock',
     items: [
       { id: 'catalog', label: 'Mes produits' },
       { id: 'stock', label: 'Stock' },
+      { id: 'lots', label: 'Lots & traçabilité' },
+      { id: 'kits', label: 'Kits' },
       { id: 'import', label: 'Import CSV' },
-      { id: 'simulator', label: 'Simulateur' },
-      { id: 'compare', label: 'Comparaison' },
-      { id: 'decision', label: 'Garder ou abandonner' },
     ],
   },
   {
@@ -34,35 +33,50 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
       { id: 'quotes', label: 'Devis' },
       { id: 'orders', label: 'Bons de commande' },
       { id: 'deliveries', label: 'Bons de livraison' },
+      { id: 'depots', label: 'Dépôts cliniques' },
       { id: 'invoices', label: 'Factures' },
-      { id: 'vat', label: 'Déclaration TVA' },
+      { id: 'credits', label: 'Avoirs' },
+      { id: 'clients', label: 'Clients' },
+    ],
+  },
+  {
+    title: 'Achats',
+    items: [
+      { id: 'purchases', label: 'Commandes fournisseurs' },
+      { id: 'receipts', label: 'Réceptions' },
+      { id: 'bills', label: 'Factures fournisseurs' },
+      { id: 'suppliers', label: 'Fournisseurs' },
+    ],
+  },
+  {
+    title: 'Analyse & fiscalité',
+    items: [
+      { id: 'vat', label: 'Déclaration de TVA' },
+      { id: 'simulator', label: 'Simulateur' },
+      { id: 'compare', label: 'Comparaison' },
+      { id: 'decision', label: 'Garder ou abandonner' },
     ],
   },
   {
     title: 'Paramètres',
-    items: [{ id: 'company', label: 'Mon entreprise' }],
+    items: [
+      { id: 'company', label: 'Mon entreprise' },
+      { id: 'backup', label: 'Sauvegarde' },
+    ],
   },
 ]
 
 export default function Sidebar({ current, onNavigate, badges }: SidebarProps) {
   return (
     <aside className="sidebar">
-      <div className="brand">ProfitPilot</div>
+      <div className="brand">
+        ProfitPilot
+        <small>Gestion commerciale</small>
+      </div>
       <nav>
         {sections.map((section) => (
           <div key={section.title}>
-            <div
-              style={{
-                fontSize: 11,
-                fontWeight: 600,
-                letterSpacing: 1,
-                textTransform: 'uppercase',
-                opacity: 0.6,
-                margin: '16px 0 4px',
-              }}
-            >
-              {section.title}
-            </div>
+            <div className="nav-section-title">{section.title}</div>
             {section.items.map((item) => {
               const badge = badges?.[item.id]
               return (
@@ -72,21 +86,7 @@ export default function Sidebar({ current, onNavigate, badges }: SidebarProps) {
                   onClick={() => onNavigate(item.id)}
                 >
                   {item.label}
-                  {!!badge && (
-                    <span
-                      title="Factures en retard"
-                      style={{
-                        marginLeft: 8,
-                        padding: '0 7px',
-                        borderRadius: 999,
-                        fontSize: 12,
-                        background: '#f59e0b',
-                        color: '#111827',
-                      }}
-                    >
-                      {badge}
-                    </span>
-                  )}
+                  {!!badge && <span className="nav-badge">{badge}</span>}
                 </button>
               )
             })}

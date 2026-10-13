@@ -1,0 +1,189 @@
+/*
+ * Thème « progiciel de gestion » (inspiré de Sage 100) : navigation à gauche en sections,
+ * bandeau de titre, boutons et grilles compacts. Chargé après theme.css, il le complète.
+ */
+.layout {
+	display: flex;
+	min-height: 100vh;
+	background: var(--pp-bg);
+	color: var(--pp-text);
+	font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+	font-size: 13px;
+}
+
+/* ---------- Navigation ---------- */
+.layout .sidebar {
+	width: 236px;
+	flex-shrink: 0;
+	position: sticky;
+	top: 0;
+	height: 100vh;
+	overflow-y: auto;
+	background: #f4f6f9;
+	border-right: 1px solid var(--pp-border);
+	padding: 0;
+	color: var(--pp-text);
+}
+.layout .sidebar .brand {
+	background: var(--pp-blue);
+	color: #fff;
+	font-size: 16px;
+	font-weight: 700;
+	letter-spacing: 0.5px;
+	padding: 14px 16px;
+}
+.layout .sidebar .brand small { display: block; font-size: 11px; font-weight: 400; opacity: 0.8; letter-spacing: 0; }
+.layout .sidebar nav { padding: 0 0 16px; display: block; }
+.nav-section-title {
+	margin-top: 6px;
+	padding: 5px 14px;
+	background: linear-gradient(#e3e9f0, #d6dee8);
+	border-top: 1px solid var(--pp-border);
+	border-bottom: 1px solid var(--pp-border);
+	color: var(--pp-title);
+	font-size: 11px;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.6px;
+}
+.layout .sidebar .nav-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	width: 100%;
+	margin: 0;
+	padding: 6px 14px 6px 18px;
+	background: none;
+	border: 0;
+	border-left: 3px solid transparent;
+	border-radius: 0;
+	color: var(--pp-text);
+	font: inherit;
+	font-size: 13px;
+	text-align: left;
+	cursor: pointer;
+	box-shadow: none;
+}
+.layout .sidebar .nav-item:hover { background: var(--pp-hover); }
+.layout .sidebar .nav-item.active {
+	background: var(--pp-select);
+	border-left-color: var(--pp-blue-2);
+	font-weight: 600;
+	color: var(--pp-blue);
+}
+.nav-badge {
+	min-width: 18px;
+	padding: 0 6px;
+	border-radius: 9px;
+	background: #d97706;
+	color: #fff;
+	font-size: 11px;
+	font-weight: 700;
+	text-align: center;
+}
+
+/* ---------- Zone de travail ---------- */
+.layout .content { flex: 1; min-width: 0; padding: 0 20px 28px; }
+.layout .content > h1 {
+	margin: 0 -20px 12px;
+	padding: 11px 20px;
+	background: #fff;
+	border-bottom: 1px solid var(--pp-border);
+	color: var(--pp-blue);
+	font-size: 18px;
+	font-weight: 600;
+}
+.layout .content h2 { font-size: 14px; color: var(--pp-title); }
+
+.layout .content button {
+	font: inherit;
+	font-size: 12.5px;
+	padding: 4px 10px;
+	border: 1px solid #9fb0c3;
+	border-radius: 3px;
+	background: linear-gradient(#ffffff, #e9eef4);
+	color: var(--pp-text);
+	cursor: pointer;
+	box-shadow: none;
+}
+.layout .content button:hover:not(:disabled) { background: linear-gradient(#f4f8fc, #dce7f3); border-color: var(--pp-blue-2); }
+.layout .content button:disabled { opacity: 0.5; cursor: not-allowed; }
+.layout .content button.btn-primary {
+	background: linear-gradient(#3a7fcb, #255f9f);
+	border-color: var(--pp-blue);
+	color: #fff;
+	font-weight: 600;
+}
+.layout .content button.btn-primary:hover:not(:disabled) { background: linear-gradient(#2f72ba, #1f4e85); }
+
+.layout .content input:not([type='checkbox']):not([type='radio']):not([type='file']),
+.layout .content select,
+.layout .content textarea {
+	font: inherit;
+	font-size: 13px;
+	padding: 3px 6px;
+	min-height: 26px;
+	border: 1px solid #aebbc9;
+	border-radius: 2px;
+	background: #fff;
+	color: var(--pp-text);
+	box-sizing: border-box;
+}
+.layout .content input:focus,
+.layout .content select:focus,
+.layout .content textarea:focus {
+	outline: none;
+	border-color: var(--pp-blue-2);
+	box-shadow: 0 0 0 2px rgba(43, 108, 176, 0.2);
+}
+
+/* Grilles des autres écrans (tableau de bord, stock, rentabilité…) */
+.layout .content table:not(.doc-ref-table) {
+	border-collapse: collapse;
+	background: #fff;
+	border: 1px solid var(--pp-border);
+	font-size: 12.5px;
+}
+.layout .content table:not(.doc-ref-table) th {
+	background: linear-gradient(var(--pp-head-1), var(--pp-head-2));
+	color: var(--pp-title);
+	font-weight: 600;
+	padding: 6px 8px;
+	border-bottom: 1px solid #b5c1ce;
+}
+.layout .content table:not(.doc-ref-table) td { padding: 4px 8px; border-bottom: 1px solid var(--pp-border-soft); }
+.layout .content table:not(.doc-ref-table) tbody tr:nth-child(even) { background: var(--pp-zebra); }
+.layout .content table:not(.doc-ref-table) tbody tr:hover { background: var(--pp-hover); }
+
+.layout .content .card {
+	background: #fff;
+	border: 1px solid var(--pp-border);
+	border-radius: 3px;
+	box-shadow: none;
+	padding: 12px 14px;
+	margin-bottom: 12px;
+}
+.layout .content .card > h2:first-child {
+	margin: -12px -14px 10px;
+	padding: 7px 14px;
+	background: linear-gradient(var(--pp-head-1), var(--pp-head-2));
+	border-bottom: 1px solid var(--pp-border);
+}
+.layout .content .export-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	align-items: center;
+	background: var(--pp-head-1);
+	border: 1px solid var(--pp-border);
+	border-radius: 3px;
+	padding: 6px 8px;
+	margin-bottom: 10px;
+}
+.layout .content .badge { border-radius: 2px; }
+
+@media print {
+	.layout { display: block; background: #fff; }
+	.layout .sidebar { display: none; }
+	.layout .content > h1 { margin: 0 0 8px; border: 0; padding: 0; }
+}

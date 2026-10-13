@@ -7,14 +7,17 @@ import {
 	formatPercent,
 } from '../utils/finance'
 import { getStockStatus } from '../utils/stock'
-import type { CommercialDocument } from '../documents/types'
+import type { CommercialDocument, StockLot } from '../documents/types'
 import { computeTotals as computeDocTotals, formatMAD, round2 } from '../documents/tva'
-import { isOverdue, today } from '../documents/numbering'
+import { today } from '../documents/numbering'
+import { balanceOf, isActive, isOverdue, sign } from '../documents/ledger'
+import { expiryState } from '../documents/stockMoves'
 
 interface DashboardProps {
 	products: Product[]
 	/** Devis, BC, BL et factures : alimentent le bloc « Ventes » */
 	documents?: CommercialDocument[]
+	lots?: StockLot[]
 	onNavigate?: (page: PageId) => void
 }
 
@@ -30,7 +33,7 @@ function rateTone(rate: number): 'good' | 'medium' | 'low' {
 	return 'low'
 }
 
-/** Synthèse des ventes en dirhams : mois en cours, encours clients, retards, devis ouverts */
+/** Synthèse commerciale en dirhams : facturé du mois (net d'avoirs), encours, retards, devis, achats à payer */
 function salesSummary(documents: CommercialDocument[]) {
 	const now = today()
 	const month = now.slice(0, 7)
@@ -39,24 +42,32 @@ function salesSummary(documents: CommercialDocument[]) {
 	let late = 0
 	let lateCount = 0
 	let invoiceCount = 0
+	let toPay = 0
 	for (const d of documents) {
-		if (d.kind !== 'invoice' || d.status === 'draft' || d.status === 'cancelled') continue
-		invoiceCount++
-		const t = computeDocTotals(d)
-		if (d.date.startsWith(month)) monthHT += t.totalHT
-		if (d.status !== 'paid') unpaid += t.netToPay
-		if (isOverdue(d, now)) {
-			late += t.netToPay
+		if (!isActive(d)) continue
+		if (d.kind === 'invoice' || d.kind === 'credit') {
+			if (d.kind === 'invoice') invoiceCount++
+			if (d.date.startsWith(month)) monthHT += sign(d) * computeDocTotals(d).totalHT
+		}
+		if (d.kind === 'invoice') unpaid += balanceOf(d, documents)
+		if (d.kind === 'bill') toPay += balanceOf(d, documents)
+		if (d.kind === 'invoice' && isOverdue(d, documents, now)) {
+			late += balanceOf(d, documents)
 			lateCount++
 		}
 	}
-	// Devis encore ouverts : non annulés et pas encore transformés en BC ou facture
+	// Devis encore ouverts : validés, non expirés et pas encore transformés
 	const converted = new Set(documents.map((d) => d.sourceId).filter(Boolean))
 	const openQuotes = documents.filter(
-		(d) => d.kind === 'quote' && d.status !== 'cancelled' && !converted.has(d.id) && d.dueDate >= now,
+		(d) => d.kind === 'quote' && d.status === 'validated' && !converted.has(d.id) && d.dueDate >= now,
 	)
 	const quotesHT = openQuotes.reduce((s, d) => s + computeDocTotals(d).totalHT, 0)
+	const depotItems = documents.reduce(
+		(n, d) => n + (d.consignment && d.status === 'validated' ? d.lines.filter((l) => l.depot === 'depot').length : 0),
+		0,
+	)
 	return {
+		active: invoiceCount > 0 || openQuotes.length > 0 || depotItems > 0 || toPay > 0,
 		invoiceCount,
 		monthHT: round2(monthHT),
 		unpaid: round2(unpaid),
@@ -64,10 +75,12 @@ function salesSummary(documents: CommercialDocument[]) {
 		lateCount,
 		openQuotes: openQuotes.length,
 		quotesHT: round2(quotesHT),
+		depotItems,
+		toPay: round2(toPay),
 	}
 }
 
-export default function Dashboard({ products, documents = [], onNavigate }: DashboardProps) {
+export default function Dashboard({ products, documents = [], lots = [], onNavigate }: DashboardProps) {
 	if (products.length === 0) {
 		return (
 			<div className="card">
@@ -90,6 +103,8 @@ export default function Dashboard({ products, documents = [], onNavigate }: Dash
 	const top3Share = totals.margin > 0 ? (top3Margin / totals.margin) * 100 : 0
 
 	const sales = salesSummary(documents)
+	const lotAlerts = lots.filter((l) => l.quantity > 0 && ['expired', 'soon'].includes(expiryState(l.expiry)))
+	const expiredLots = lotAlerts.filter((l) => expiryState(l.expiry) === 'expired').length
 	const stockAlerts = products
 		.map((p) => ({ product: p, status: getStockStatus(p) }))
 		.filter((x) => x.status === 'out' || x.status === 'low')
@@ -114,7 +129,7 @@ export default function Dashboard({ products, documents = [], onNavigate }: Dash
 				/>
 			</div>
 
-			{(sales.invoiceCount > 0 || sales.openQuotes > 0) && (
+			{sales.active && (
 				<>
 					<h2>Ventes</h2>
 					<div className="kpi-grid">
@@ -137,6 +152,13 @@ export default function Dashboard({ products, documents = [], onNavigate }: Dash
 							hint={`${sales.openQuotes} devis à transformer`}
 							tone="medium"
 						/>
+						<KpiCard
+							label="Implants en dépôt"
+							value={String(sales.depotItems)}
+							hint="chez les cliniques, à facturer à la pose"
+							tone="neutral"
+						/>
+						<KpiCard label="Fournisseurs à payer" value={formatMAD(sales.toPay)} tone="neutral" />
 					</div>
 				</>
 			)}
@@ -162,6 +184,20 @@ export default function Dashboard({ products, documents = [], onNavigate }: Dash
 					{onNavigate && (
 						<button type="button" onClick={() => onNavigate('stock')}>
 							Voir le stock
+						</button>
+					)}
+				</div>
+			)}
+
+			{lotAlerts.length > 0 && (
+				<div className="card">
+					<div className="insight-label">Péremptions</div>
+					<div className="insight-title">
+						{expiredLots} lot(s) périmé(s), {lotAlerts.length - expiredLots} à moins de 90 jours
+					</div>
+					{onNavigate && (
+						<button type="button" onClick={() => onNavigate('lots')}>
+							Voir les lots
 						</button>
 					)}
 				</div>

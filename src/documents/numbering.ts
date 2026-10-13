@@ -1,6 +1,6 @@
 import { DOC_LABELS, type CommercialDocument, type DocKind, type DocLine } from './types'
 
-/** Numérotation chronologique et continue par type et par année : FA-2026-0001, BC-2026-0001, BL-2026-0001 */
+/** Numérotation chronologique et continue par type et par année : FA-2026-0001, BL-2026-0001… */
 export function nextNumber(kind: DocKind, docs: CommercialDocument[], date: string): string {
 	const year = date.slice(0, 4)
 	const prefix = `${DOC_LABELS[kind].prefix}-${year}-`
@@ -29,11 +29,14 @@ export function addDays(date: string, days: number): string {
 	return d.toISOString().slice(0, 10)
 }
 
-export function emptyLine(): DocLine {
-	return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
+export function daysBetween(from: string, to: string): number {
+	return Math.round((new Date(to + 'T00:00:00').getTime() - new Date(from + 'T00:00:00').getTime()) / 86400000)
 }
 
-/** Facture validée, non payée, dont l'échéance est dépassée */
-export function isOverdue(doc: CommercialDocument, now = today()): boolean {
-	return doc.kind === 'invoice' && doc.status === 'validated' && !!doc.dueDate && doc.dueDate < now
+export function frDate(d: string | undefined): string {
+	return d ? new Date(d + 'T00:00:00').toLocaleDateString('fr-FR') : ''
+}
+
+export function emptyLine(): DocLine {
+	return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
