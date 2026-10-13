@@ -1,8 +1,8 @@
 import { useMemo, useState } from 'react'
 import type { Product } from '../types'
-import DocumentEditor, { emptyLine } from './DocumentEditor'
+import DocumentEditor from './DocumentEditor'
 import DocumentPrint from './DocumentPrint'
-import { addDays, newId, nextNumber, today } from './numbering'
+import { addDays, emptyLine, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
 	DOC_LABELS,

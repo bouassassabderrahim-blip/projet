@@ -10,7 +10,7 @@ import {
 	type TvaRate,
 } from './types'
 import { TVA_RATES, computeTotals, formatMAD, lineHT } from './tva'
-import { newId } from './numbering'
+import { emptyLine } from './numbering'
 
 interface Props {
 	initial: CommercialDocument
@@ -31,10 +31,6 @@ const partyFields: { key: keyof Party; label: string }[] = [
 	{ key: 'phone', label: 'Téléphone' },
 	{ key: 'email', label: 'E-mail' },
 ]
-
-export function emptyLine(): DocLine {
-	return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
-}
 
 export default function DocumentEditor({ initial, products, knownParties, onSave, onCancel }: Props) {
 	const [doc, setDoc] = useState(initial)

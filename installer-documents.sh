@@ -224,7 +224,7 @@ FIN_DU_FICHIER
 echo "OK src/documents/tva.ts"
 
 cat > src/documents/numbering.ts <<'FIN_DU_FICHIER'
-import { DOC_LABELS, type CommercialDocument, type DocKind } from './types'
+import { DOC_LABELS, type CommercialDocument, type DocKind, type DocLine } from './types'
 
 /** Numérotation chronologique et continue par type et par année : FA-2026-0001, BC-2026-0001, BL-2026-0001 */
 export function nextNumber(kind: DocKind, docs: CommercialDocument[], date: string): string {
@@ -253,6 +253,10 @@ export function addDays(date: string, days: number): string {
   const d = new Date(date + 'T00:00:00')
   d.setDate(d.getDate() + days)
   return d.toISOString().slice(0, 10)
+}
+
+export function emptyLine(): DocLine {
+  return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
 FIN_DU_FICHIER
 echo "OK src/documents/numbering.ts"
@@ -333,7 +337,7 @@ import {
   type TvaRate,
 } from './types'
 import { TVA_RATES, computeTotals, formatMAD, lineHT } from './tva'
-import { newId } from './numbering'
+import { emptyLine } from './numbering'
 
 interface Props {
   initial: CommercialDocument
@@ -354,10 +358,6 @@ const partyFields: { key: keyof Party; label: string }[] = [
   { key: 'phone', label: 'Téléphone' },
   { key: 'email', label: 'E-mail' },
 ]
-
-export function emptyLine(): DocLine {
-  return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
-}
 
 export default function DocumentEditor({ initial, products, knownParties, onSave, onCancel }: Props) {
   const [doc, setDoc] = useState(initial)
@@ -751,9 +751,9 @@ echo "OK src/documents/DocumentPrint.tsx"
 cat > src/documents/DocumentsPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
 import type { Product } from '../types'
-import DocumentEditor, { emptyLine } from './DocumentEditor'
+import DocumentEditor from './DocumentEditor'
 import DocumentPrint from './DocumentPrint'
-import { addDays, newId, nextNumber, today } from './numbering'
+import { addDays, emptyLine, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
   DOC_LABELS,
@@ -1536,4 +1536,4 @@ export default function App() {
 FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
-cp src/types.ts src/types.ts.bak && sed -i.tmp "s/'decision'/'decision' | 'invoices' | 'orders' | 'deliveries' | 'company'/" src/types.ts && rm -f src/types.ts.tmp && grep -n invoices src/types.ts
+grep -q "'invoices'" src/types.ts || { cp src/types.ts src/types.ts.bak && sed -i.tmp "s/'decision'/'decision' | 'invoices' | 'orders' | 'deliveries' | 'company'/" src/types.ts && rm -f src/types.ts.tmp; }; grep -n invoices src/types.ts

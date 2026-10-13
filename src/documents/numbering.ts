@@ -1,4 +1,4 @@
-import { DOC_LABELS, type CommercialDocument, type DocKind } from './types'
+import { DOC_LABELS, type CommercialDocument, type DocKind, type DocLine } from './types'
 
 /** Numérotation chronologique et continue par type et par année : FA-2026-0001, BC-2026-0001, BL-2026-0001 */
 export function nextNumber(kind: DocKind, docs: CommercialDocument[], date: string): string {
@@ -27,4 +27,8 @@ export function addDays(date: string, days: number): string {
 	const d = new Date(date + 'T00:00:00')
 	d.setDate(d.getDate() + days)
 	return d.toISOString().slice(0, 10)
+}
+
+export function emptyLine(): DocLine {
+	return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
