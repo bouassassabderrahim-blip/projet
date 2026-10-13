@@ -450,3 +450,23 @@
 	html, body, #root { height: auto !important; min-height: 0 !important; }
 	body:has(.doc-print) .layout { height: 0 !important; min-height: 0 !important; overflow: hidden !important; }
 }
+
+/* ---------- Alertes de stock ---------- */
+.doc-stats .doc-stat-danger { border-top-color: #dc2626; background: #fef2f2; }
+.doc-stats .doc-stat-danger strong { color: #b91c1c; }
+.doc-row-danger td { background: #fef2f2 !important; }
+.stock-alert-banner {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 0 0 10px;
+	padding: 7px 10px;
+	background: #fef2f2;
+	border: 1px solid #fca5a5;
+	border-left: 4px solid #dc2626;
+	border-radius: 3px;
+	color: #7f1d1d;
+	font-size: 12.5px;
+}
+.stock-alert-banner span { flex: 1; }
+.stock-alert-banner .stock-alert-close { padding: 2px 7px !important; }

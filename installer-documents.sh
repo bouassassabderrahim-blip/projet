@@ -7,6 +7,7 @@ mkdir -p src/documents src/components
 for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src/types.ts; do [ -f "$f" ] && cp "$f" "$f.bak"; done; true
 
 
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { downloadFile } from './csv'
@@ -2716,6 +2717,262 @@ export default function ReminderPrint({ company, party, invoices, onClose }: Pro
 FIN_DU_FICHIER
 echo "OK src/documents/ReminderPrint.tsx"
 
+cat > src/documents/StockAlertsPage.tsx <<'FIN_DU_FICHIER'
+import { useMemo } from 'react'
+import type { Product } from '../types'
+import { getStockStatus } from '../utils/stock'
+import { addDays, emptyLine, frDate, newId, nextNumber, today } from './numbering'
+import { expiryState } from './stockMoves'
+import { formatMAD, round2 } from './tva'
+import { emptyParty, type CommercialDocument, type DocKind, type StockLot } from './types'
+import './documents.css'
+
+interface Props {
+  products: Product[]
+  lots: StockLot[]
+  documents: CommercialDocument[]
+  onChange: (docs: CommercialDocument[]) => void
+  onNavigate: (kind: DocKind, openId?: string) => void
+  onOpenStock: () => void
+}
+
+/** Quantités commandées aux fournisseurs (commandes validées pas encore réceptionnées) */
+function onOrder(documents: CommercialDocument[]): Map<string, number> {
+  const received = new Set(documents.filter((d) => d.kind === 'receipt' && d.status !== 'cancelled').map((d) => d.sourceId))
+  const qty = new Map<string, number>()
+  for (const d of documents) {
+    if (d.kind !== 'purchase' || d.status !== 'validated' || received.has(d.id)) continue
+    for (const l of d.lines) if (l.productId) qty.set(l.productId, (qty.get(l.productId) ?? 0) + l.quantity)
+  }
+  return qty
+}
+
+/** Quantité conseillée : remonter à 2 × le seuil d'alerte, déduction faite de ce qui est déjà commandé */
+function suggestedQty(p: Product, ordered: number): number {
+  const stock = p.stock ?? 0
+  const target = Math.max((p.minStock ?? 0) * 2, 1)
+  return Math.max(target - stock - ordered, 0)
+}
+
+/** Alertes de stock : ruptures, articles sous le seuil, lots périmés, et réapprovisionnement */
+export default function StockAlertsPage({ products, lots, documents, onChange, onNavigate, onOpenStock }: Props) {
+  const now = today()
+  const ordered = useMemo(() => onOrder(documents), [documents])
+
+  const alerts = useMemo(
+    () =>
+      products
+        .map((p) => ({ product: p, status: getStockStatus(p), ordered: ordered.get(p.id) ?? 0 }))
+        .filter((a) => a.status === 'out' || a.status === 'low')
+        .map((a) => ({ ...a, suggested: suggestedQty(a.product, a.ordered) }))
+        .sort((a, b) => (a.status === b.status ? a.product.name.localeCompare(b.product.name) : a.status === 'out' ? -1 : 1)),
+    [products, ordered],
+  )
+
+  const lotAlerts = useMemo(
+    () =>
+      lots
+        .filter((l) => l.quantity > 0)
+        .map((l) => ({ lot: l, state: expiryState(l.expiry, now) }))
+        .filter((x) => x.state === 'expired' || x.state === 'soon')
+        .sort((a, b) => a.lot.expiry.localeCompare(b.lot.expiry)),
+    [lots, now],
+  )
+
+  const unset = products.filter((p) => getStockStatus(p) === 'unset').length
+  const out = alerts.filter((a) => a.status === 'out').length
+  const low = alerts.length - out
+  const expired = lotAlerts.filter((x) => x.state === 'expired').length
+
+  // Réapprovisionnement regroupé par fournisseur
+  const bySupplier = useMemo(() => {
+    const groups = new Map<string, typeof alerts>()
+    for (const a of alerts) {
+      if (a.suggested <= 0) continue
+      const key = a.product.supplier?.trim() || 'Fournisseur non renseigné'
+      groups.set(key, [...(groups.get(key) ?? []), a])
+    }
+    return [...groups.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [alerts])
+
+  function createPurchase(supplier: string, items: typeof alerts) {
+    const id = newId()
+    const known = supplier !== 'Fournisseur non renseigné'
+    const order: CommercialDocument = {
+      id,
+      kind: 'purchase',
+      number: nextNumber('purchase', documents, now),
+      date: now,
+      dueDate: addDays(now, 60),
+      party: { ...emptyParty(), name: known ? supplier : '' },
+      lines: items.map((a) => ({
+        ...emptyLine(),
+        productId: a.product.id,
+        description: a.product.name,
+        quantity: a.suggested,
+        unitPriceHT: a.product.unitCost,
+      })),
+      status: 'draft',
+      paymentMethod: 'virement',
+      notes: 'Réapprovisionnement (alertes de stock)',
+    }
+    onChange([...documents, order])
+    onNavigate('purchase', id)
+  }
+
+  const name = (id: string) => products.find((p) => p.id === id)?.name ?? '(article supprimé)'
+
+  return (
+    <div>
+      <div className="doc-stats">
+        <div className={out ? 'doc-stat-danger' : undefined}>
+          <span>Ruptures</span>
+          <strong>{out}</strong>
+        </div>
+        <div className={low ? 'doc-stat-late' : undefined}>
+          <span>Sous le seuil d'alerte</span>
+          <strong>{low}</strong>
+        </div>
+        <div className={expired ? 'doc-stat-danger' : lotAlerts.length ? 'doc-stat-late' : undefined}>
+          <span>Lots périmés / sous 90 jours</span>
+          <strong>
+            {expired} / {lotAlerts.length - expired}
+          </strong>
+        </div>
+        <div>
+          <span>Articles sans stock renseigné</span>
+          <strong>{unset}</strong>
+        </div>
+      </div>
+
+      {alerts.length === 0 && lotAlerts.length === 0 && (
+        <p className="doc-info">Aucune alerte : tous les articles suivis sont au-dessus de leur seuil.</p>
+      )}
+      {unset > 0 && (
+        <p className="doc-warning">
+          {unset} article(s) n'ont ni stock ni seuil d'alerte : ils ne peuvent pas déclencher d'alerte.{' '}
+          <button type="button" onClick={onOpenStock}>
+            Renseigner le stock
+          </button>
+        </p>
+      )}
+
+      {alerts.length > 0 && (
+        <div className="doc-panel">
+          <div className="doc-panel-title">Articles à surveiller</div>
+          <div className="doc-table-wrap">
+            <table className="doc-table">
+              <thead>
+                <tr>
+                  <th>État</th>
+                  <th>Référence</th>
+                  <th>Article</th>
+                  <th>Fournisseur</th>
+                  <th className="num">Stock</th>
+                  <th className="num">Seuil</th>
+                  <th className="num">En commande</th>
+                  <th className="num">À commander</th>
+                  <th className="num">Coût estimé HT</th>
+                </tr>
+              </thead>
+              <tbody>
+                {alerts.map((a) => (
+                  <tr key={a.product.id} className={a.status === 'out' ? 'doc-row-danger' : 'doc-row-late'}>
+                    <td>
+                      <span className={`doc-badge ${a.status === 'out' ? 'doc-exp-expired' : 'doc-exp-soon'}`}>
+                        {a.status === 'out' ? 'Rupture' : 'Sous le seuil'}
+                      </span>
+                    </td>
+                    <td>{a.product.reference}</td>
+                    <td>{a.product.name}</td>
+                    <td>{a.product.supplier}</td>
+                    <td className="num">{a.product.stock ?? 0}</td>
+                    <td className="num">{a.product.minStock ?? 0}</td>
+                    <td className="num">{a.ordered || ''}</td>
+                    <td className="num">
+                      <strong>{a.suggested || '—'}</strong>
+                    </td>
+                    <td className="num">{a.suggested ? formatMAD(round2(a.suggested * a.product.unitCost)) : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="doc-count">
+            Quantité conseillée : de quoi remonter à deux fois le seuil d'alerte, moins ce qui est déjà commandé.
+          </p>
+        </div>
+      )}
+
+      {bySupplier.length > 0 && (
+        <div className="doc-panel">
+          <div className="doc-panel-title">Réapprovisionnement par fournisseur</div>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Fournisseur</th>
+                <th>Articles</th>
+                <th className="num">Montant estimé HT</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {bySupplier.map(([supplier, items]) => (
+                <tr key={supplier}>
+                  <td>{supplier}</td>
+                  <td>{items.map((a) => `${a.suggested} × ${a.product.name}`).join(', ')}</td>
+                  <td className="num">
+                    {formatMAD(round2(items.reduce((s, a) => s + a.suggested * a.product.unitCost, 0)))}
+                  </td>
+                  <td>
+                    <button type="button" className="btn-primary" onClick={() => createPurchase(supplier, items)}>
+                      Créer la commande fournisseur
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {lotAlerts.length > 0 && (
+        <div className="doc-panel">
+          <div className="doc-panel-title">Péremptions</div>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>État</th>
+                <th>Article</th>
+                <th>Lot</th>
+                <th>N° série</th>
+                <th>Péremption</th>
+                <th className="num">Quantité</th>
+              </tr>
+            </thead>
+            <tbody>
+              {lotAlerts.map(({ lot, state }) => (
+                <tr key={lot.id} className={state === 'expired' ? 'doc-row-danger' : 'doc-row-late'}>
+                  <td>
+                    <span className={`doc-badge doc-exp-${state}`}>{state === 'expired' ? 'Périmé' : '< 90 jours'}</span>
+                  </td>
+                  <td>{name(lot.productId)}</td>
+                  <td>{lot.lot}</td>
+                  <td>{lot.serial}</td>
+                  <td>{frDate(lot.expiry)}</td>
+                  <td className="num">{lot.quantity}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/StockAlertsPage.tsx"
+
 cat > src/documents/VatPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
 import { downloadCsv } from './csv'
@@ -3472,6 +3729,26 @@ cat > src/documents/documents.css <<'FIN_DU_FICHIER'
   html, body, #root { height: auto !important; min-height: 0 !important; }
   body:has(.doc-print) .layout { height: 0 !important; min-height: 0 !important; overflow: hidden !important; }
 }
+
+/* ---------- Alertes de stock ---------- */
+.doc-stats .doc-stat-danger { border-top-color: #dc2626; background: #fef2f2; }
+.doc-stats .doc-stat-danger strong { color: #b91c1c; }
+.doc-row-danger td { background: #fef2f2 !important; }
+.stock-alert-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 10px;
+  padding: 7px 10px;
+  background: #fef2f2;
+  border: 1px solid #fca5a5;
+  border-left: 4px solid #dc2626;
+  border-radius: 3px;
+  color: #7f1d1d;
+  font-size: 12.5px;
+}
+.stock-alert-banner span { flex: 1; }
+.stock-alert-banner .stock-alert-close { padding: 2px 7px !important; }
 FIN_DU_FICHIER
 echo "OK src/documents/documents.css"
 
@@ -4434,6 +4711,7 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
     items: [
       { id: 'catalog', label: 'Mes produits' },
       { id: 'stock', label: 'Stock' },
+      { id: 'alerts', label: 'Alertes stock' },
       { id: 'lots', label: 'Lots & traçabilité' },
       { id: 'kits', label: 'Kits' },
       { id: 'import', label: 'Import CSV' },
@@ -4809,6 +5087,8 @@ import LotsPage from './documents/LotsPage'
 import KitsPage from './documents/KitsPage'
 import PartiesPage from './documents/PartiesPage'
 import BackupPage from './documents/BackupPage'
+import StockAlertsPage from './documents/StockAlertsPage'
+import { getStockStatus } from './utils/stock'
 import { isOverdue } from './documents/ledger'
 import { applyMove, expiryState } from './documents/stockMoves'
 import { useCompany, useDocuments, useKits, useLots, useParties } from './documents/storage'
@@ -4826,6 +5106,7 @@ const titles: Record<PageId, string> = {
   dashboard: 'Tableau de bord',
   catalog: 'Mes produits',
   stock: 'Gestion du stock',
+  alerts: 'Alertes de stock',
   products: 'Rentabilité par produit',
   breakeven: 'Résultat & seuil de rentabilité',
   import: 'Import de fichiers CSV',
@@ -4881,6 +5162,7 @@ const commercialPages = new Set<PageId>([
   'suppliers',
   'lots',
   'kits',
+  'alerts',
   'vat',
   'company',
   'backup',
@@ -4960,6 +5242,8 @@ export default function App() {
   const [lots, setLots] = useLots()
   const [kits, setKits] = useKits()
   const [parties, setParties] = useParties()
+  // Bandeau d'alerte de stock masquable jusqu'au prochain chargement
+  const [alertBannerHidden, setAlertBannerHidden] = useState(false)
 
   useEffect(() => {
     try {
@@ -5023,9 +5307,22 @@ export default function App() {
   }
 
   const docKind = docPages[page]
+  const stockAlerts = useMemo(() => {
+    let out = 0
+    let low = 0
+    for (const p of products) {
+      const status = getStockStatus(p)
+      if (status === 'out') out++
+      if (status === 'low') low++
+    }
+    const expired = lots.filter((l) => l.quantity > 0 && expiryState(l.expiry) === 'expired').length
+    return { out, low, expired, total: out + low + expired }
+  }, [products, lots])
+
   const badges = useMemo(() => {
     const overdue = (kind: DocKind) => documents.filter((d) => d.kind === kind && isOverdue(d, documents)).length
     return {
+      alerts: stockAlerts.total,
       invoices: overdue('invoice'),
       bills: overdue('bill'),
       lots: lots.filter((l) => l.quantity > 0 && ['expired', 'soon'].includes(expiryState(l.expiry))).length,
@@ -5034,7 +5331,7 @@ export default function App() {
         0,
       ),
     }
-  }, [documents, lots])
+  }, [documents, lots, stockAlerts])
 
   return (
     <div className="layout">
@@ -5045,6 +5342,26 @@ export default function App() {
           {isSampleData ? ' · données de démonstration' : ''}
         </p>
         <h1>{titles[page]}</h1>
+        {stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && (
+          <div className="stock-alert-banner no-print">
+            <span>
+              <strong>Alerte stock :</strong>{' '}
+              {[
+                stockAlerts.out && `${stockAlerts.out} rupture(s)`,
+                stockAlerts.low && `${stockAlerts.low} article(s) sous le seuil`,
+                stockAlerts.expired && `${stockAlerts.expired} lot(s) périmé(s)`,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </span>
+            <button type="button" onClick={() => navigate('alerts')}>
+              Voir les alertes
+            </button>
+            <button type="button" className="stock-alert-close" title="Masquer" onClick={() => setAlertBannerHidden(true)}>
+              ✕
+            </button>
+          </div>
+        )}
         {!commercialPages.has(page) && (
           <>
             <div className="export-bar" style={{ alignItems: 'center' }}>
@@ -5122,6 +5439,16 @@ export default function App() {
           <PartiesPage role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} />
         )}
         {page === 'lots' && <LotsPage lots={lots} onChange={setLots} products={products} documents={documents} />}
+        {page === 'alerts' && (
+          <StockAlertsPage
+            products={products}
+            lots={lots}
+            documents={documents}
+            onChange={setDocuments}
+            onNavigate={openDocument}
+            onOpenStock={() => navigate('stock')}
+          />
+        )}
         {page === 'kits' && <KitsPage kits={kits} onChange={setKits} products={products} />}
         {page === 'vat' && <VatPage documents={documents} />}
         {page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
@@ -5134,7 +5461,7 @@ FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
 # Nouvelles pages dans le type PageId
-for id in quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
+for id in alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
   grep -q "'$id'" src/types.ts || sed -i.tmp "s/'decision'/'decision' | '$id'/" src/types.ts
 done
 rm -f src/types.ts.tmp

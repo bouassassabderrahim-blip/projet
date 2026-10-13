@@ -21,6 +21,8 @@ import LotsPage from './documents/LotsPage'
 import KitsPage from './documents/KitsPage'
 import PartiesPage from './documents/PartiesPage'
 import BackupPage from './documents/BackupPage'
+import StockAlertsPage from './documents/StockAlertsPage'
+import { getStockStatus } from './utils/stock'
 import { isOverdue } from './documents/ledger'
 import { applyMove, expiryState } from './documents/stockMoves'
 import { useCompany, useDocuments, useKits, useLots, useParties } from './documents/storage'
@@ -38,6 +40,7 @@ const titles: Record<PageId, string> = {
 	dashboard: 'Tableau de bord',
 	catalog: 'Mes produits',
 	stock: 'Gestion du stock',
+	alerts: 'Alertes de stock',
 	products: 'Rentabilité par produit',
 	breakeven: 'Résultat & seuil de rentabilité',
 	import: 'Import de fichiers CSV',
@@ -93,6 +96,7 @@ const commercialPages = new Set<PageId>([
 	'suppliers',
 	'lots',
 	'kits',
+	'alerts',
 	'vat',
 	'company',
 	'backup',
@@ -172,6 +176,8 @@ export default function App() {
 	const [lots, setLots] = useLots()
 	const [kits, setKits] = useKits()
 	const [parties, setParties] = useParties()
+	// Bandeau d'alerte de stock masquable jusqu'au prochain chargement
+	const [alertBannerHidden, setAlertBannerHidden] = useState(false)
 
 	useEffect(() => {
 		try {
@@ -235,9 +241,22 @@ export default function App() {
 	}
 
 	const docKind = docPages[page]
+	const stockAlerts = useMemo(() => {
+		let out = 0
+		let low = 0
+		for (const p of products) {
+			const status = getStockStatus(p)
+			if (status === 'out') out++
+			if (status === 'low') low++
+		}
+		const expired = lots.filter((l) => l.quantity > 0 && expiryState(l.expiry) === 'expired').length
+		return { out, low, expired, total: out + low + expired }
+	}, [products, lots])
+
 	const badges = useMemo(() => {
 		const overdue = (kind: DocKind) => documents.filter((d) => d.kind === kind && isOverdue(d, documents)).length
 		return {
+			alerts: stockAlerts.total,
 			invoices: overdue('invoice'),
 			bills: overdue('bill'),
 			lots: lots.filter((l) => l.quantity > 0 && ['expired', 'soon'].includes(expiryState(l.expiry))).length,
@@ -246,7 +265,7 @@ export default function App() {
 				0,
 			),
 		}
-	}, [documents, lots])
+	}, [documents, lots, stockAlerts])
 
 	return (
 		<div className="layout">
@@ -257,6 +276,26 @@ export default function App() {
 					{isSampleData ? ' · données de démonstration' : ''}
 				</p>
 				<h1>{titles[page]}</h1>
+				{stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && (
+					<div className="stock-alert-banner no-print">
+						<span>
+							<strong>Alerte stock :</strong>{' '}
+							{[
+								stockAlerts.out && `${stockAlerts.out} rupture(s)`,
+								stockAlerts.low && `${stockAlerts.low} article(s) sous le seuil`,
+								stockAlerts.expired && `${stockAlerts.expired} lot(s) périmé(s)`,
+							]
+								.filter(Boolean)
+								.join(' · ')}
+						</span>
+						<button type="button" onClick={() => navigate('alerts')}>
+							Voir les alertes
+						</button>
+						<button type="button" className="stock-alert-close" title="Masquer" onClick={() => setAlertBannerHidden(true)}>
+							✕
+						</button>
+					</div>
+				)}
 				{!commercialPages.has(page) && (
 					<>
 						<div className="export-bar" style={{ alignItems: 'center' }}>
@@ -334,6 +373,16 @@ export default function App() {
 					<PartiesPage role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} />
 				)}
 				{page === 'lots' && <LotsPage lots={lots} onChange={setLots} products={products} documents={documents} />}
+				{page === 'alerts' && (
+					<StockAlertsPage
+						products={products}
+						lots={lots}
+						documents={documents}
+						onChange={setDocuments}
+						onNavigate={openDocument}
+						onOpenStock={() => navigate('stock')}
+					/>
+				)}
 				{page === 'kits' && <KitsPage kits={kits} onChange={setKits} products={products} />}
 				{page === 'vat' && <VatPage documents={documents} />}
 				{page === 'company' && <CompanySettings company={company} onChange={setCompany} />}

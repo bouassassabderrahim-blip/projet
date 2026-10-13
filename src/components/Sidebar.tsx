@@ -22,6 +22,7 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
     items: [
       { id: 'catalog', label: 'Mes produits' },
       { id: 'stock', label: 'Stock' },
+      { id: 'alerts', label: 'Alertes stock' },
       { id: 'lots', label: 'Lots & traçabilité' },
       { id: 'kits', label: 'Kits' },
       { id: 'import', label: 'Import CSV' },
