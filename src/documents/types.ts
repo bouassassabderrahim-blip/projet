@@ -41,6 +41,44 @@ export interface PartyRecord extends Party {
 	paymentTerms?: number
 }
 
+/**
+ * Mise en page des pièces imprimées :
+ * - generated : en-tête et pied de page générés à partir de la fiche société
+ * - images : votre en-tête et votre pied de page (images) en haut et en bas de chaque page
+ * - background : votre papier à en-tête complet (image A4) en fond de chaque page
+ * - preprinted : impression sur papier déjà imprimé, on réserve seulement les marges
+ */
+export type LetterheadMode = 'generated' | 'images' | 'background' | 'preprinted'
+
+export interface PrintSettings {
+	mode: LetterheadMode
+	headerImg?: string
+	footerImg?: string
+	backgroundImg?: string
+	/** Marges en millimètres (haut et bas : place réservée à l'en-tête et au pied de page) */
+	top: number
+	bottom: number
+	side: number
+	/** Mentions légales (ICE, IF, RC…) en bas de page */
+	showLegal: boolean
+	/** Couleur des titres et bandeaux */
+	accent: string
+	/** Conditions imprimées par défaut sous les devis et les factures */
+	quoteTerms: string
+	invoiceTerms: string
+}
+
+export const defaultPrintSettings = (): PrintSettings => ({
+	mode: 'generated',
+	top: 15,
+	bottom: 15,
+	side: 15,
+	showLegal: true,
+	accent: '#1f4e79',
+	quoteTerms: 'Devis valable 30 jours. Délai de livraison : selon disponibilité. Paiement : 60 jours à réception de facture.',
+	invoiceTerms: 'Paiement à 60 jours à réception de facture. Tout retard de paiement donne lieu à des pénalités conformément à la loi 69-21.',
+})
+
 /** Informations de votre entreprise, imprimées sur chaque document */
 export interface CompanyInfo extends Party {
 	patente: string
@@ -49,6 +87,7 @@ export interface CompanyInfo extends Party {
 	rib: string
 	/** Logo en data URL (PNG/JPEG) */
 	logo?: string
+	print?: PrintSettings
 }
 
 /** Suivi d'un implant laissé en dépôt chez une clinique */

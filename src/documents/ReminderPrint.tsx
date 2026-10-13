@@ -1,4 +1,6 @@
-import { CompanyFooter, CompanyHeader } from './DocumentPrint'
+import PrintSheet from './PrintSheet'
+import { CompanyFooter, CompanyHeader } from './PrintParts'
+import { printSettingsOf, usesGeneratedHeader } from './printSettings'
 import { daysBetween, frDate, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import type { CommercialDocument, CompanyInfo, Party } from './types'
@@ -13,6 +15,7 @@ interface Props {
 /** Lettre de relance des factures échues d'un client */
 export default function ReminderPrint({ company, party, invoices, onClose }: Props) {
 	const now = today()
+	const settings = printSettingsOf(company)
 	const total = round2(invoices.reduce((s, i) => s + i.balance, 0))
 
 	return (
@@ -27,14 +30,13 @@ export default function ReminderPrint({ company, party, invoices, onClose }: Pro
 			</div>
 
 			<div className="doc-print">
-				<header className="doc-print-head">
-					<CompanyHeader company={company} />
-					<section className="doc-box doc-party">
-						<div className="doc-party-name">{party.name}</div>
-						<div>{party.address}</div>
-						<div>{party.city}</div>
-					</section>
-				</header>
+				<PrintSheet company={company} footer={settings.showLegal ? <CompanyFooter company={company} /> : null}>
+				{usesGeneratedHeader(settings) && <CompanyHeader company={company} />}
+				<section className="doc-box doc-party doc-reminder-party">
+					<div className="doc-party-name">{party.name}</div>
+					<div>{party.address}</div>
+					<div>{party.city}</div>
+				</section>
 
 				<p style={{ textAlign: 'right' }}>
 					{company.city ? `${company.city}, le ` : 'Le '}
@@ -92,7 +94,7 @@ export default function ReminderPrint({ company, party, invoices, onClose }: Pro
 					Service comptabilité
 				</p>
 
-				<CompanyFooter company={company} />
+				</PrintSheet>
 			</div>
 		</div>
 	)

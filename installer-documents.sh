@@ -6,6 +6,7 @@ set -e
 mkdir -p src/documents src/components
 for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src/types.ts; do [ -f "$f" ] && cp "$f" "$f.bak"; done; true
 
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { downloadFile } from './csv'
@@ -92,7 +93,9 @@ echo "OK src/documents/BackupPage.tsx"
 
 cat > src/documents/CompanySettings.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
-import type { CompanyInfo } from './types'
+import DocumentPrint from './DocumentPrint'
+import { loadImage, printSettingsOf } from './printSettings'
+import type { CommercialDocument, CompanyInfo, LetterheadMode, PrintSettings } from './types'
 import './documents.css'
 
 interface Props {
@@ -100,7 +103,7 @@ interface Props {
   onChange: (company: CompanyInfo) => void
 }
 
-const fields: { key: Exclude<keyof CompanyInfo, 'logo' | 'individual'>; label: string; hint?: string }[] = [
+const fields: { key: 'name' | 'address' | 'city' | 'phone' | 'email' | 'ice' | 'ifNumber' | 'rc' | 'patente' | 'cnss' | 'bank' | 'rib'; label: string; hint?: string }[] = [
   { key: 'name', label: 'Raison sociale' },
   { key: 'address', label: 'Adresse' },
   { key: 'city', label: 'Ville' },
@@ -115,47 +118,82 @@ const fields: { key: Exclude<keyof CompanyInfo, 'logo' | 'individual'>; label: s
   { key: 'rib', label: 'RIB', hint: '24 chiffres' },
 ]
 
-const MAX_LOGO = 300 * 1024
+const MODES: { mode: LetterheadMode; title: string; text: string }[] = [
+  { mode: 'generated', title: 'En-tête automatique', text: 'Logo et coordonnées tirés de la fiche ci-dessus.' },
+  { mode: 'images', title: 'Mon en-tête en image', text: 'Image de votre en-tête (et de votre pied de page) répétée sur chaque page.' },
+  { mode: 'background', title: 'Mon papier à en-tête complet', text: 'Image A4 entière (scan ou export PDF → PNG) en fond de chaque page.' },
+  { mode: 'preprinted', title: 'Papier déjà imprimé', text: 'Rien n’est imprimé en haut ni en bas : seules les marges sont réservées.' },
+]
 
-/** Mentions légales de l'émetteur et logo, imprimés sur toutes les pièces */
+/** Facture d'exemple pour l'aperçu de la mise en page */
+const SAMPLE: CommercialDocument = {
+  id: 'sample',
+  kind: 'invoice',
+  number: 'FA-2026-0001',
+  date: '2026-10-13',
+  dueDate: '2026-12-12',
+  party: { name: 'Clinique Exemple', address: '12, boulevard Zerktouni', city: 'Casablanca', ice: '002345678000012', ifNumber: '', rc: '', phone: '', email: '' },
+  lines: [
+    { id: '1', description: 'Tige fémorale cimentée taille 3', quantity: 1, unitPriceHT: 9500, tvaRate: 7, discount: 0, lot: 'L2409', serial: 'SN-10452', expiry: '2029-05-01' },
+    { id: '2', description: 'Cotyle double mobilité 52 mm', quantity: 1, unitPriceHT: 7200, tvaRate: 7, discount: 0, lot: 'L2411' },
+    { id: '3', description: 'Ciment orthopédique 40 g', quantity: 2, unitPriceHT: 450, tvaRate: 20, discount: 10 },
+  ],
+  status: 'validated',
+  paymentMethod: 'virement',
+  notes: '',
+  intervention: { patient: 'M. A. Alami', patientRef: 'BE123456', surgeon: 'Dr Bennani', clinic: 'Clinique Exemple', date: '2026-10-10', coverage: 'CNSS' },
+}
+
+/** Fiche société, papier à en-tête et mise en page des pièces imprimées */
 export default function CompanySettings({ company, onChange }: Props) {
   const [draft, setDraft] = useState(company)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  const print = printSettingsOf(draft)
   const iceInvalid = draft.ice !== '' && !/^\d{15}$/.test(draft.ice)
   const ribInvalid = draft.rib !== '' && !/^\d{24}$/.test(draft.rib.replace(/\s/g, ''))
 
   const set = (patch: Partial<CompanyInfo>) => {
-    setDraft({ ...draft, ...patch })
+    setDraft((d) => ({ ...d, ...patch }))
+    setSaved(false)
+  }
+  const setPrint = (patch: Partial<PrintSettings>) => {
+    setDraft((d) => ({ ...d, print: { ...printSettingsOf(d), ...patch } }))
     setSaved(false)
   }
 
-  function loadLogo(file: File | undefined) {
+  async function upload(file: File | undefined, apply: (dataUrl: string, ratio: number) => void, maxWidth?: number) {
     if (!file) return
-    if (!file.type.startsWith('image/')) return setError('Choisissez une image (PNG ou JPEG).')
-    if (file.size > MAX_LOGO) return setError('Logo trop lourd : 300 Ko maximum.')
-    const reader = new FileReader()
-    reader.onload = () => {
-      set({ logo: String(reader.result) })
+    if (!file.type.startsWith('image/')) return setError('Choisissez une image (PNG ou JPEG). Un PDF doit d’abord être exporté en image.')
+    try {
+      const { dataUrl, ratio } = await loadImage(file, maxWidth)
+      apply(dataUrl, ratio)
       setError('')
+    } catch {
+      setError('Image illisible.')
     }
-    reader.readAsDataURL(file)
+  }
+
+  function save() {
+    try {
+      onChange(draft)
+      setSaved(true)
+    } catch {
+      setError('Enregistrement impossible : images trop lourdes pour le navigateur.')
+    }
+  }
+
+  const number = (v: string, fallback: number) => {
+    const n = Number(v.replace(',', '.'))
+    return Number.isFinite(n) && n >= 0 ? n : fallback
   }
 
   return (
     <div>
       <div className="doc-editor-head">
-        <h2>Fiche société</h2>
+        <h2>Fiche société et mise en page</h2>
         <div className="doc-editor-actions">
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={iceInvalid}
-            onClick={() => {
-              onChange(draft)
-              setSaved(true)
-            }}
-          >
+          <button type="button" className="btn-primary" disabled={iceInvalid} onClick={save}>
             Enregistrer
           </button>
           {saved && <span className="doc-count">Enregistré ✓</span>}
@@ -177,21 +215,137 @@ export default function CompanySettings({ company, onChange }: Props) {
         </div>
         {iceInvalid && <p className="doc-error">L'ICE doit comporter exactement 15 chiffres.</p>}
         {ribInvalid && <p className="doc-warning">Le RIB marocain comporte normalement 24 chiffres.</p>}
-      </fieldset>
-
-      <fieldset className="doc-panel">
-        <legend>Logo</legend>
         <div className="doc-logo-row">
-          {draft.logo ? <img className="doc-logo" src={draft.logo} alt="Logo" /> : <span className="doc-count">Aucun logo</span>}
-          <input type="file" accept="image/png,image/jpeg" onChange={(e) => loadLogo(e.target.files?.[0])} />
+          <span className="doc-count">Logo (en-tête automatique) :</span>
+          {draft.logo && <img className="doc-logo" src={draft.logo} alt="Logo" />}
+          <input
+            type="file"
+            accept="image/png,image/jpeg"
+            onChange={(e) => upload(e.target.files?.[0], (logo) => set({ logo }), 600)}
+          />
           {draft.logo && (
             <button type="button" onClick={() => set({ logo: undefined })}>
               Retirer
             </button>
           )}
         </div>
-        {error && <p className="doc-error">{error}</p>}
       </fieldset>
+
+      <div className="doc-layout-settings">
+        <fieldset className="doc-panel">
+          <legend>Papier à en-tête</legend>
+          <div className="doc-mode-list">
+            {MODES.map((m) => (
+              <label key={m.mode} className={`doc-mode ${print.mode === m.mode ? 'doc-mode-active' : ''}`}>
+                <input type="radio" name="letterhead" checked={print.mode === m.mode} onChange={() => setPrint({ mode: m.mode })} />
+                <span>
+                  <strong>{m.title}</strong>
+                  <small>{m.text}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+
+          {print.mode === 'images' && (
+            <div className="doc-grid">
+              <label>
+                Image de l'en-tête
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  onChange={(e) =>
+                    upload(e.target.files?.[0], (headerImg, ratio) =>
+                      // Marge haute = hauteur de l'image à pleine largeur A4 + 5 mm
+                      setPrint({ headerImg, top: Math.ceil(210 * ratio) + 5 }),
+                    )
+                  }
+                />
+              </label>
+              <label>
+                Image du pied de page
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  onChange={(e) =>
+                    upload(e.target.files?.[0], (footerImg, ratio) =>
+                      setPrint({ footerImg, bottom: Math.ceil(210 * ratio) + 5, showLegal: false }),
+                    )
+                  }
+                />
+              </label>
+              {(print.headerImg || print.footerImg) && (
+                <button type="button" onClick={() => setPrint({ headerImg: undefined, footerImg: undefined })}>
+                  Retirer les images
+                </button>
+              )}
+            </div>
+          )}
+
+          {print.mode === 'background' && (
+            <div className="doc-grid">
+              <label>
+                Papier à en-tête (image A4 portrait)
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg"
+                  onChange={(e) => upload(e.target.files?.[0], (backgroundImg) => setPrint({ backgroundImg, showLegal: false }))}
+                />
+              </label>
+              {print.backgroundImg && (
+                <button type="button" onClick={() => setPrint({ backgroundImg: undefined })}>
+                  Retirer le fond
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="doc-grid">
+            <label>
+              Marge haute (mm)
+              <input className="num" type="number" min={0} max={150} value={print.top} onChange={(e) => setPrint({ top: number(e.target.value, print.top) })} />
+            </label>
+            <label>
+              Marge basse (mm)
+              <input className="num" type="number" min={0} max={120} value={print.bottom} onChange={(e) => setPrint({ bottom: number(e.target.value, print.bottom) })} />
+            </label>
+            <label>
+              Marges gauche / droite (mm)
+              <input className="num" type="number" min={5} max={40} value={print.side} onChange={(e) => setPrint({ side: number(e.target.value, print.side) })} />
+            </label>
+            <label>
+              Couleur des titres
+              <input type="color" value={print.accent} onChange={(e) => setPrint({ accent: e.target.value })} />
+            </label>
+            <label className="doc-check">
+              <input type="checkbox" checked={print.showLegal} onChange={(e) => setPrint({ showLegal: e.target.checked })} />
+              Mentions légales (ICE, IF, RC, RIB) en bas de page
+            </label>
+          </div>
+          <p className="doc-count">
+            Astuce : sur papier à en-tête, augmentez la marge haute jusqu'à ce que le titre de la pièce passe sous votre
+            en-tête dans l'aperçu.
+          </p>
+
+          <label className="doc-notes">
+            Conditions imprimées sous les devis
+            <textarea rows={2} value={print.quoteTerms} onChange={(e) => setPrint({ quoteTerms: e.target.value })} />
+          </label>
+          <label className="doc-notes">
+            Conditions imprimées sous les factures
+            <textarea rows={2} value={print.invoiceTerms} onChange={(e) => setPrint({ invoiceTerms: e.target.value })} />
+          </label>
+          {error && <p className="doc-error">{error}</p>}
+        </fieldset>
+
+        <div className="doc-panel doc-preview-panel">
+          <div className="doc-panel-title">Aperçu (facture d'exemple)</div>
+          <div className="doc-preview">
+            <div className="doc-preview-inner">
+              <DocumentPrint doc={SAMPLE} company={draft} settings={print} embedded />
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }
@@ -819,7 +973,10 @@ FIN_DU_FICHIER
 echo "OK src/documents/DocumentEditor.tsx"
 
 cat > src/documents/DocumentPrint.tsx <<'FIN_DU_FICHIER'
-import { DOC_LABELS, PAYMENT_LABELS, type CommercialDocument, type CompanyInfo } from './types'
+import PrintSheet from './PrintSheet'
+import { CompanyFooter, CompanyHeader } from './PrintParts'
+import { printSettingsOf, usesGeneratedHeader } from './printSettings'
+import { DOC_LABELS, PAYMENT_LABELS, type CommercialDocument, type CompanyInfo, type PrintSettings } from './types'
 import { amountInWordsMAD, computeTotals, formatMAD, lineHT } from './tva'
 import { frDate } from './numbering'
 
@@ -829,278 +986,237 @@ interface Props {
   /** Règlements et avoirs déjà imputés (factures) */
   paid?: number
   balance?: number
-  onClose: () => void
+  /** Réglages à prévisualiser (page Paramètres) */
+  settings?: PrintSettings
+  /** Aperçu intégré : sans barre d'outils */
+  embedded?: boolean
+  onClose?: () => void
 }
 
-export function CompanyHeader({ company }: { company: CompanyInfo }) {
-  return (
-    <div className="doc-print-company">
-      {company.logo && <img className="doc-logo" src={company.logo} alt="" />}
-      <div>
-        <strong className="doc-company">{company.name || 'Votre entreprise'}</strong>
-        <div>{company.address}</div>
-        <div>{company.city}</div>
-        <div>{[company.phone, company.email].filter(Boolean).join(' · ')}</div>
-      </div>
-    </div>
-  )
-}
-
-export function CompanyFooter({ company }: { company: CompanyInfo }) {
-  return (
-    <footer className="doc-footer">
-      {[
-        company.name,
-        company.ice && `ICE : ${company.ice}`,
-        company.ifNumber && `IF : ${company.ifNumber}`,
-        company.rc && `RC : ${company.rc}`,
-        company.patente && `Patente : ${company.patente}`,
-        company.cnss && `CNSS : ${company.cnss}`,
-      ]
-        .filter(Boolean)
-        .join(' · ')}
-      {company.rib && (
-        <div>
-          {company.bank} · RIB : {company.rib}
-        </div>
-      )}
-    </footer>
-  )
-}
-
-/** Aperçu imprimable (bouton « Imprimer / PDF ») */
-export default function DocumentPrint({ doc, company, paid = 0, balance, onClose }: Props) {
+/** Pièce commerciale au format A4, compatible avec votre papier à en-tête */
+export default function DocumentPrint({ doc, company, paid = 0, balance, settings, embedded, onClose }: Props) {
+  const s = settings ?? printSettingsOf(company)
   const totals = computeTotals(doc)
   const info = DOC_LABELS[doc.kind]
   // BL et bons de réception servent à la logistique : pas de prix
   const showPrices = doc.kind !== 'delivery' && doc.kind !== 'receipt'
   const showTrace = doc.lines.some((l) => l.lot || l.serial || l.expiry)
   const iv = doc.intervention
-  const partyLabel =
-    info.side === 'purchase' ? 'Fournisseur' : doc.kind === 'delivery' ? 'Livré à' : 'Client'
+  const partyLabel = info.side === 'purchase' ? 'Fournisseur' : doc.kind === 'delivery' ? 'Livré à' : 'Client'
+  const terms = doc.kind === 'quote' ? s.quoteTerms : doc.kind === 'invoice' ? s.invoiceTerms : ''
+  const signatures =
+    doc.kind === 'quote' || doc.kind === 'order' || doc.kind === 'delivery' || doc.kind === 'receipt' || doc.kind === 'purchase'
+
+  const refs: [string, string][] = [
+    ['Date', frDate(doc.date)],
+    ...((doc.kind === 'invoice' || doc.kind === 'bill') && doc.dueDate ? [['Échéance', frDate(doc.dueDate)] as [string, string]] : []),
+    ...(doc.kind === 'quote' && doc.dueDate ? [['Valable jusqu’au', frDate(doc.dueDate)] as [string, string]] : []),
+    ...(doc.supplierRef ? [['Réf. fournisseur', doc.supplierRef] as [string, string]] : []),
+    ...(doc.sourceNumber ? [[doc.kind === 'credit' ? 'Sur facture' : 'Référence', doc.sourceNumber] as [string, string]] : []),
+    ...(doc.kind === 'invoice' || doc.kind === 'credit' || doc.kind === 'bill'
+      ? [['Règlement', PAYMENT_LABELS[doc.paymentMethod]] as [string, string]]
+      : []),
+  ]
 
   return (
     <div>
-      <div className="doc-toolbar no-print">
-        <button type="button" className="btn-primary" onClick={() => window.print()}>
-          Imprimer / PDF
-        </button>
-        <button type="button" onClick={onClose}>
-          Retour à la liste
-        </button>
-      </div>
+      {!embedded && (
+        <div className="doc-toolbar no-print">
+          <button type="button" className="btn-primary" onClick={() => window.print()}>
+            Imprimer / PDF
+          </button>
+          {onClose && (
+            <button type="button" onClick={onClose}>
+              Retour à la liste
+            </button>
+          )}
+          <span className="doc-count">Mise en page et papier à en-tête : Paramètres › Mon entreprise</span>
+        </div>
+      )}
 
       <div className="doc-print">
-        <header className="doc-print-head">
-          <CompanyHeader company={company} />
-          <div className="doc-print-title">
+        <PrintSheet company={company} settings={s} footer={s.showLegal ? <CompanyFooter company={company} /> : null}>
+          {usesGeneratedHeader(s) && <CompanyHeader company={company} />}
+
+          <div className="doc-title-block">
             <h2>
               {info.printTitle}
               {doc.consignment ? ' (DÉPÔT)' : ''}
             </h2>
-            <table className="doc-ref-table">
-              <tbody>
-                <tr>
-                  <th>N°</th>
-                  <td>{doc.number}</td>
-                </tr>
-                <tr>
-                  <th>Date</th>
-                  <td>{frDate(doc.date)}</td>
-                </tr>
-                {(doc.kind === 'invoice' || doc.kind === 'bill') && doc.dueDate && (
-                  <tr>
-                    <th>Échéance</th>
-                    <td>{frDate(doc.dueDate)}</td>
-                  </tr>
-                )}
-                {doc.kind === 'quote' && doc.dueDate && (
-                  <tr>
-                    <th>Validité</th>
-                    <td>{frDate(doc.dueDate)}</td>
-                  </tr>
-                )}
-                {doc.supplierRef && (
-                  <tr>
-                    <th>Réf. fournisseur</th>
-                    <td>{doc.supplierRef}</td>
-                  </tr>
-                )}
-                {doc.sourceNumber && (
-                  <tr>
-                    <th>{doc.kind === 'credit' ? 'Sur facture' : 'Votre réf.'}</th>
-                    <td>{doc.sourceNumber}</td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            <div className="doc-title-number">N° {doc.number}</div>
           </div>
-        </header>
 
-        <div className="doc-print-boxes">
-          {iv ? (
+          <div className="doc-print-boxes">
             <section className="doc-box">
-              <strong>Intervention</strong>
-              {iv.patient && <div>Patient : {iv.patient}</div>}
-              {iv.patientRef && <div>Dossier / CIN : {iv.patientRef}</div>}
-              {iv.surgeon && <div>Chirurgien : {iv.surgeon}</div>}
-              {iv.clinic && <div>Établissement : {iv.clinic}</div>}
-              {iv.date && <div>Date : {frDate(iv.date)}</div>}
-              {iv.coverage && <div>Prise en charge : {iv.coverage}</div>}
+              <table className="doc-ref-table">
+                <tbody>
+                  {refs.map(([k, v]) => (
+                    <tr key={k}>
+                      <th>{k}</th>
+                      <td>{v}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </section>
-          ) : (
-            <span />
-          )}
-          <section className="doc-box doc-party">
-            <strong>{partyLabel}</strong>
-            <div className="doc-party-name">{doc.party.name}</div>
-            <div>{doc.party.address}</div>
-            <div>{doc.party.city}</div>
-            {doc.party.ice && <div>ICE : {doc.party.ice}</div>}
-            {doc.party.ifNumber && <div>IF : {doc.party.ifNumber}</div>}
-            {doc.party.rc && <div>RC : {doc.party.rc}</div>}
-          </section>
-        </div>
+            <section className="doc-box doc-party">
+              <strong>{partyLabel}</strong>
+              <div className="doc-party-name">{doc.party.name}</div>
+              <div>{doc.party.address}</div>
+              <div>{doc.party.city}</div>
+              {doc.party.ice && <div>ICE : {doc.party.ice}</div>}
+              {doc.party.ifNumber && <div>IF : {doc.party.ifNumber}</div>}
+              {doc.party.rc && <div>RC : {doc.party.rc}</div>}
+            </section>
+          </div>
 
-        <table className="doc-table doc-print-lines">
-          <thead>
-            <tr>
-              <th>Désignation</th>
-              {showTrace && (
-                <>
-                  <th>Lot / N° série</th>
-                  <th>Péremption</th>
-                </>
-              )}
-              <th className="num">Qté</th>
-              {showPrices && (
-                <>
-                  <th className="num">P.U. HT</th>
-                  <th className="num">Rem.</th>
-                  <th className="num">TVA</th>
-                  <th className="num">Total HT</th>
-                </>
-              )}
-            </tr>
-          </thead>
-          <tbody>
-            {doc.lines.map((l) => (
-              <tr key={l.id}>
-                <td>{l.description}</td>
-                {showTrace && (
-                  <>
-                    <td>{[l.lot, l.serial].filter(Boolean).join(' / ')}</td>
-                    <td>{frDate(l.expiry)}</td>
-                  </>
-                )}
-                <td className="num">{l.quantity}</td>
+          {iv && (
+            <section className="doc-box doc-intervention">
+              <strong>Intervention</strong>
+              <div className="doc-intervention-grid">
+                {iv.patient && <span>Patient : {iv.patient}</span>}
+                {iv.patientRef && <span>Dossier / CIN : {iv.patientRef}</span>}
+                {iv.surgeon && <span>Chirurgien : {iv.surgeon}</span>}
+                {iv.clinic && <span>Établissement : {iv.clinic}</span>}
+                {iv.date && <span>Date : {frDate(iv.date)}</span>}
+                {iv.coverage && <span>Prise en charge : {iv.coverage}</span>}
+              </div>
+            </section>
+          )}
+
+          <table className="doc-table doc-print-lines">
+            <thead>
+              <tr>
+                <th className="doc-col-index">#</th>
+                <th>Désignation</th>
+                {showTrace && <th>Lot / N° série</th>}
+                {showTrace && <th>Péremption</th>}
+                <th className="num">Qté</th>
                 {showPrices && (
                   <>
-                    <td className="num">{formatMAD(l.unitPriceHT)}</td>
-                    <td className="num">{l.discount ? `${l.discount} %` : ''}</td>
-                    <td className="num">{l.tvaRate} %</td>
-                    <td className="num">{formatMAD(lineHT(l))}</td>
+                    <th className="num">P.U. HT</th>
+                    <th className="num">Rem.</th>
+                    <th className="num">TVA</th>
+                    <th className="num">Total HT</th>
                   </>
                 )}
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {doc.lines.map((l, i) => (
+                <tr key={l.id}>
+                  <td className="doc-col-index">{i + 1}</td>
+                  <td>{l.description}</td>
+                  {showTrace && <td>{[l.lot, l.serial].filter(Boolean).join(' / ')}</td>}
+                  {showTrace && <td>{frDate(l.expiry)}</td>}
+                  <td className="num">{l.quantity}</td>
+                  {showPrices && (
+                    <>
+                      <td className="num">{formatMAD(l.unitPriceHT)}</td>
+                      <td className="num">{l.discount ? `${l.discount} %` : ''}</td>
+                      <td className="num">{l.tvaRate} %</td>
+                      <td className="num">{formatMAD(lineHT(l))}</td>
+                    </>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
 
-        {showPrices && (
-          <div className="doc-print-bottom">
-            <table className="doc-table doc-vat-table">
-              <thead>
-                <tr>
-                  <th>Taux</th>
-                  <th className="num">Base HT</th>
-                  <th className="num">TVA</th>
-                </tr>
-              </thead>
-              <tbody>
-                {totals.byRate.map((r) => (
-                  <tr key={r.rate}>
-                    <td>{r.rate} %</td>
-                    <td className="num">{formatMAD(r.base)}</td>
-                    <td className="num">{formatMAD(r.tva)}</td>
+          {showPrices && (
+            <div className="doc-print-bottom">
+              <table className="doc-table doc-vat-table">
+                <thead>
+                  <tr>
+                    <th>Taux TVA</th>
+                    <th className="num">Base HT</th>
+                    <th className="num">Montant TVA</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-            <table className="doc-table doc-totals-box">
-              <tbody>
-                <tr>
-                  <td>Total HT</td>
-                  <td className="num">{formatMAD(totals.totalHT)}</td>
-                </tr>
-                <tr>
-                  <td>Total TVA</td>
-                  <td className="num">{formatMAD(totals.totalTVA)}</td>
-                </tr>
-                <tr className="doc-total-row">
-                  <td>Total TTC</td>
-                  <td className="num">{formatMAD(totals.totalTTC)}</td>
-                </tr>
-                {totals.stampDuty > 0 && (
-                  <>
+                </thead>
+                <tbody>
+                  {totals.byRate.map((r) => (
+                    <tr key={r.rate}>
+                      <td>{r.rate} %</td>
+                      <td className="num">{formatMAD(r.base)}</td>
+                      <td className="num">{formatMAD(r.tva)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <table className="doc-table doc-totals-box">
+                <tbody>
+                  <tr>
+                    <td>Total HT</td>
+                    <td className="num">{formatMAD(totals.totalHT)}</td>
+                  </tr>
+                  <tr>
+                    <td>Total TVA</td>
+                    <td className="num">{formatMAD(totals.totalTVA)}</td>
+                  </tr>
+                  {totals.stampDuty > 0 && (
                     <tr>
                       <td>Droit de timbre 0,25 %</td>
                       <td className="num">{formatMAD(totals.stampDuty)}</td>
                     </tr>
-                    <tr className="doc-total-row">
-                      <td>Net à payer</td>
-                      <td className="num">{formatMAD(totals.netToPay)}</td>
-                    </tr>
-                  </>
-                )}
-                {doc.kind === 'invoice' && paid > 0 && balance !== undefined && (
-                  <>
-                    <tr>
-                      <td>Déjà réglé / avoirs</td>
-                      <td className="num">{formatMAD(totals.netToPay - balance)}</td>
-                    </tr>
-                    <tr className="doc-total-row">
-                      <td>Reste dû</td>
-                      <td className="num">{formatMAD(balance)}</td>
-                    </tr>
-                  </>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-
-        {(doc.kind === 'invoice' || doc.kind === 'credit') && (
-          <p>
-            {doc.kind === 'invoice' ? 'Arrêtée la présente facture' : 'Arrêté le présent avoir'} à la somme de :{' '}
-            <strong>{amountInWordsMAD(totals.netToPay)}</strong> TTC.
-            <br />
-            Mode de règlement : {PAYMENT_LABELS[doc.paymentMethod]}
-          </p>
-        )}
-
-        {doc.notes && <p className="doc-notes-print">{doc.notes}</p>}
-
-        {(doc.kind === 'quote' || doc.kind === 'order' || doc.kind === 'delivery' || doc.kind === 'receipt' || doc.kind === 'purchase') && (
-          <div className="doc-signatures">
-            <div>
-              {doc.kind === 'delivery'
-                ? 'Signature du livreur'
-                : doc.kind === 'receipt'
-                  ? 'Réceptionné par'
-                  : "Cachet et signature de l'entreprise"}
+                  )}
+                  <tr className="doc-grand-total">
+                    <td>{totals.stampDuty > 0 ? 'Net à payer' : 'Total TTC'}</td>
+                    <td className="num">{formatMAD(totals.netToPay)}</td>
+                  </tr>
+                  {doc.kind === 'invoice' && paid > 0 && balance !== undefined && (
+                    <>
+                      <tr>
+                        <td>Déjà réglé / avoirs</td>
+                        <td className="num">{formatMAD(totals.netToPay - balance)}</td>
+                      </tr>
+                      <tr className="doc-total-row">
+                        <td>Reste dû</td>
+                        <td className="num">{formatMAD(balance)}</td>
+                      </tr>
+                    </>
+                  )}
+                </tbody>
+              </table>
             </div>
-            <div>
-              {doc.kind === 'delivery'
-                ? 'Reçu conforme : cachet et signature du client'
-                : doc.kind === 'receipt'
-                  ? 'Contrôle qualité / conformité'
-                  : 'Bon pour accord : cachet et signature'}
-            </div>
-          </div>
-        )}
+          )}
 
-        <CompanyFooter company={company} />
+          {(doc.kind === 'invoice' || doc.kind === 'credit' || doc.kind === 'quote') && (
+            <p className="doc-amount-words">
+              {doc.kind === 'invoice'
+                ? 'Arrêtée la présente facture'
+                : doc.kind === 'credit'
+                  ? 'Arrêté le présent avoir'
+                  : 'Arrêté le présent devis'}{' '}
+              à la somme de : <strong>{amountInWordsMAD(totals.netToPay)}</strong> TTC.
+            </p>
+          )}
+
+          {(terms || doc.notes) && (
+            <div className="doc-terms">
+              {doc.notes && <p className="doc-notes-print">{doc.notes}</p>}
+              {terms && <p className="doc-terms-text">{terms}</p>}
+            </div>
+          )}
+
+          {signatures && (
+            <div className="doc-signatures">
+              <div>
+                {doc.kind === 'delivery'
+                  ? 'Signature du livreur'
+                  : doc.kind === 'receipt'
+                    ? 'Réceptionné par'
+                    : "Cachet et signature de l'entreprise"}
+              </div>
+              <div>
+                {doc.kind === 'delivery'
+                  ? 'Reçu conforme : cachet et signature du client'
+                  : doc.kind === 'receipt'
+                    ? 'Contrôle qualité / conformité'
+                    : 'Bon pour accord : date, cachet et signature du client'}
+              </div>
+            </div>
+          )}
+        </PrintSheet>
       </div>
     </div>
   )
@@ -2381,8 +2497,124 @@ export default function PaymentDialog({ doc, balance, onSave, onClose }: Props) 
 FIN_DU_FICHIER
 echo "OK src/documents/PaymentDialog.tsx"
 
+cat > src/documents/PrintParts.tsx <<'FIN_DU_FICHIER'
+import type { CompanyInfo } from './types'
+
+/** En-tête société généré (quand on n'imprime pas sur papier à en-tête) */
+export function CompanyHeader({ company }: { company: CompanyInfo }) {
+  return (
+    <header className="doc-print-head">
+      <div className="doc-print-company">
+        {company.logo && <img className="doc-logo" src={company.logo} alt="" />}
+        <div>
+          <strong className="doc-company">{company.name || 'Votre entreprise'}</strong>
+          <div>{company.address}</div>
+          <div>{company.city}</div>
+          <div>{[company.phone, company.email].filter(Boolean).join(' · ')}</div>
+        </div>
+      </div>
+    </header>
+  )
+}
+
+/** Mentions légales de l'émetteur, répétées en bas de chaque page */
+export function CompanyFooter({ company }: { company: CompanyInfo }) {
+  const ids = [
+    company.ice && `ICE : ${company.ice}`,
+    company.ifNumber && `IF : ${company.ifNumber}`,
+    company.rc && `RC : ${company.rc}`,
+    company.patente && `Patente : ${company.patente}`,
+    company.cnss && `CNSS : ${company.cnss}`,
+  ].filter(Boolean)
+  return (
+    <footer className="doc-footer">
+      <div>
+        <strong>{company.name}</strong>
+        {company.address ? ` · ${company.address}` : ''}
+        {company.city ? `, ${company.city}` : ''}
+        {company.phone ? ` · Tél. ${company.phone}` : ''}
+      </div>
+      {ids.length > 0 && <div>{ids.join(' · ')}</div>}
+      {company.rib && (
+        <div>
+          {company.bank} · RIB : {company.rib}
+        </div>
+      )}
+    </footer>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/PrintParts.tsx"
+
+cat > src/documents/PrintSheet.tsx <<'FIN_DU_FICHIER'
+import type { CSSProperties, ReactNode } from 'react'
+import { printSettingsOf } from './printSettings'
+import type { CompanyInfo, PrintSettings } from './types'
+
+interface Props {
+  company: CompanyInfo
+  /** Réglages à appliquer (aperçu en direct depuis les paramètres) */
+  settings?: PrintSettings
+  /** Pied de page (mentions légales) quand le papier n'en a pas */
+  footer?: ReactNode
+  children: ReactNode
+}
+
+/**
+ * Feuille A4 : place le papier à en-tête (image d'en-tête, de pied de page ou fond complet)
+ * et réserve les marges. À l'impression, l'en-tête et le pied de page se répètent sur chaque page
+ * (éléments fixes) et les marges sont réservées par l'en-tête et le pied d'un tableau englobant,
+ * que le navigateur répète lui aussi sur chaque page.
+ */
+export default function PrintSheet({ company, settings, footer, children }: Props) {
+  const s = settings ?? printSettingsOf(company)
+  const style = {
+    '--doc-accent': s.accent,
+    '--sheet-top': `${s.top}mm`,
+    '--sheet-bottom': `${s.bottom}mm`,
+    '--sheet-side': `${s.side}mm`,
+  } as CSSProperties
+
+  return (
+    <div className={`doc-sheet doc-sheet-${s.mode}`} style={style}>
+      {/* Page imprimée bord à bord : les marges sont gérées par la feuille */}
+      <style>{'@page { size: A4; margin: 0; }'}</style>
+      {s.mode === 'background' && s.backgroundImg && <img className="sheet-bg" src={s.backgroundImg} alt="" />}
+      {s.mode === 'images' && s.headerImg && <img className="sheet-header" src={s.headerImg} alt="" />}
+      {s.mode === 'images' && s.footerImg && <img className="sheet-footer" src={s.footerImg} alt="" />}
+      {s.mode === 'preprinted' && <div className="sheet-preprinted no-print">Zone réservée au papier pré-imprimé</div>}
+
+      <table className="sheet-frame">
+        <thead>
+          <tr>
+            <td>
+              <div className="sheet-space-top" />
+            </td>
+          </tr>
+        </thead>
+        <tfoot>
+          <tr>
+            <td>
+              <div className="sheet-space-bottom">{footer}</div>
+            </td>
+          </tr>
+        </tfoot>
+        <tbody>
+          <tr>
+            <td className="sheet-body">{children}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/PrintSheet.tsx"
+
 cat > src/documents/ReminderPrint.tsx <<'FIN_DU_FICHIER'
-import { CompanyFooter, CompanyHeader } from './DocumentPrint'
+import PrintSheet from './PrintSheet'
+import { CompanyFooter, CompanyHeader } from './PrintParts'
+import { printSettingsOf, usesGeneratedHeader } from './printSettings'
 import { daysBetween, frDate, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import type { CommercialDocument, CompanyInfo, Party } from './types'
@@ -2397,6 +2629,7 @@ interface Props {
 /** Lettre de relance des factures échues d'un client */
 export default function ReminderPrint({ company, party, invoices, onClose }: Props) {
   const now = today()
+  const settings = printSettingsOf(company)
   const total = round2(invoices.reduce((s, i) => s + i.balance, 0))
 
   return (
@@ -2411,14 +2644,13 @@ export default function ReminderPrint({ company, party, invoices, onClose }: Pro
       </div>
 
       <div className="doc-print">
-        <header className="doc-print-head">
-          <CompanyHeader company={company} />
-          <section className="doc-box doc-party">
-            <div className="doc-party-name">{party.name}</div>
-            <div>{party.address}</div>
-            <div>{party.city}</div>
-          </section>
-        </header>
+        <PrintSheet company={company} footer={settings.showLegal ? <CompanyFooter company={company} /> : null}>
+        {usesGeneratedHeader(settings) && <CompanyHeader company={company} />}
+        <section className="doc-box doc-party doc-reminder-party">
+          <div className="doc-party-name">{party.name}</div>
+          <div>{party.address}</div>
+          <div>{party.city}</div>
+        </section>
 
         <p style={{ textAlign: 'right' }}>
           {company.city ? `${company.city}, le ` : 'Le '}
@@ -2476,7 +2708,7 @@ export default function ReminderPrint({ company, party, invoices, onClose }: Pro
           Service comptabilité
         </p>
 
-        <CompanyFooter company={company} />
+        </PrintSheet>
       </div>
     </div>
   )
@@ -3048,77 +3280,197 @@ cat > src/documents/documents.css <<'FIN_DU_FICHIER'
   border-top: 1px solid var(--pp-border);
 }
 
-/* ---------- Pièce imprimable (format A4) ---------- */
-.doc-print {
+/* ---------- Pièce imprimable (feuille A4) ---------- */
+.doc-print { overflow-x: auto; padding: 4px 0 16px; }
+
+.doc-sheet {
+  --doc-accent: var(--pp-blue);
+  position: relative;
+  width: 210mm;
+  min-height: 297mm;
+  margin: 0 auto;
   background: #fff;
   color: #111;
-  max-width: 820px;
-  padding: 36px 40px;
-  border: 1px solid var(--pp-border);
-  box-shadow: 0 2px 10px rgba(15, 23, 42, 0.12);
-  font-size: 12.5px;
+  box-shadow: 0 2px 12px rgba(15, 23, 42, 0.18);
+  font-size: 12px;
   line-height: 1.45;
+  overflow: hidden;
 }
+.sheet-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; z-index: 0; }
+.sheet-header { position: absolute; top: 0; left: 0; width: 100%; z-index: 0; }
+.sheet-footer { position: absolute; bottom: 0; left: 0; width: 100%; z-index: 0; }
+.sheet-preprinted {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--sheet-top);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #94a3b8;
+  font-size: 11px;
+  border-bottom: 1px dashed #cbd5e1;
+  background: repeating-linear-gradient(45deg, #f8fafc 0 8px, #f1f5f9 8px 16px);
+}
+.doc-sheet .sheet-frame {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 297mm;
+  border-collapse: collapse;
+  border: 0 !important;
+  background: transparent !important;
+}
+.doc-sheet .sheet-frame > thead > tr > td,
+.doc-sheet .sheet-frame > tfoot > tr > td,
+.doc-sheet .sheet-frame > tbody > tr > td {
+  padding: 0 var(--sheet-side) !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+.doc-sheet .sheet-frame > tbody > tr,
+.doc-sheet .sheet-frame > tbody > tr:hover { background: transparent !important; }
+.doc-sheet .sheet-body { vertical-align: top; }
+.sheet-space-top { height: var(--sheet-top); }
+.sheet-space-bottom {
+  min-height: var(--sheet-bottom);
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: 6mm;
+  box-sizing: border-box;
+}
+
+/* En-tête généré */
 .doc-print-head {
   display: flex;
-  justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 20px;
-  padding-bottom: 12px;
-  border-bottom: 2px solid var(--pp-blue);
+  justify-content: center;
+  margin-bottom: 4mm;
+  padding-bottom: 3mm;
+  border-bottom: 2px solid var(--doc-accent);
 }
-.doc-print-company { display: flex; gap: 12px; align-items: flex-start; }
-.doc-company { font-size: 17px; color: var(--pp-blue); }
-.doc-print-title { text-align: right; }
-.doc-print-title h2 { margin: 0 0 6px; font-size: 18px; letter-spacing: 1.5px; color: var(--pp-blue); }
-.doc-ref-table { border-collapse: collapse; margin-left: auto; font-size: 12px; }
-.doc-ref-table th, .doc-ref-table td { border: 1px solid var(--pp-border); padding: 2px 8px; text-align: left; }
-.doc-ref-table th { background: var(--pp-head-1); font-weight: 600; color: var(--pp-title); }
+.doc-print-company { display: flex; gap: 14px; align-items: center; text-align: left; }
+.doc-company { font-size: 17px; color: var(--doc-accent); }
+.doc-logo { max-height: 22mm; max-width: 60mm; object-fit: contain; }
 
-.doc-print-boxes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
-.doc-box { border: 1px solid var(--pp-border); border-radius: 3px; padding: 8px 12px; }
+/* Titre centré */
+.doc-title-block { text-align: center; margin: 2mm 0 5mm; }
+.doc-sheet .doc-title-block h2 {
+  display: inline-block;
+  margin: 0;
+  padding: 1.5mm 10mm;
+  font-size: 17px;
+  letter-spacing: 2px;
+  color: #fff !important;
+  background: var(--doc-accent);
+  border-radius: 2px;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.doc-title-number { margin-top: 1.5mm; font-size: 13px; font-weight: 600; color: var(--doc-accent); }
+
+.doc-print-boxes { display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; margin-bottom: 4mm; }
+.doc-box { border: 1px solid #c9d1db; border-radius: 3px; padding: 2.5mm 3.5mm; background: rgba(255, 255, 255, 0.92); }
 .doc-box > strong:first-child {
   display: block;
-  font-size: 11px;
+  font-size: 10px;
   text-transform: uppercase;
   color: var(--pp-muted);
-  letter-spacing: 0.4px;
-  margin-bottom: 2px;
+  letter-spacing: 0.5px;
+  margin-bottom: 1mm;
 }
-.doc-party-name { font-weight: 700; font-size: 14px; }
-.doc-print .doc-table { font-size: 12px; }
-.doc-print .doc-table tbody tr:nth-child(even) { background: #fafbfc; }
-.doc-print-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; margin: 8px 0 12px; }
-.doc-notes-print { white-space: pre-wrap; border-left: 3px solid var(--pp-border); padding-left: 8px; color: #374151; }
+.doc-party-name { font-weight: 700; font-size: 13.5px; }
+.doc-ref-table { border-collapse: collapse; width: 100%; font-size: 11.5px; }
+.doc-ref-table th, .doc-ref-table td { border: 0; border-bottom: 1px dotted #d5dbe3; padding: 1mm 1.5mm; text-align: left; background: none; }
+.doc-ref-table th { width: 38%; font-weight: 600; color: var(--pp-muted); }
+.doc-ref-table tr:last-child th, .doc-ref-table tr:last-child td { border-bottom: 0; }
+.doc-intervention { margin-bottom: 4mm; }
+.doc-intervention-grid { display: flex; flex-wrap: wrap; gap: 1mm 6mm; }
+.doc-reminder-party { width: 45%; margin: 0 0 6mm auto; }
 
-.doc-signatures { display: flex; justify-content: space-between; gap: 24px; margin-top: 28px; }
-.doc-signatures div { flex: 1; height: 90px; border: 1px solid var(--pp-border); padding: 6px 8px; font-size: 11px; color: var(--pp-muted); }
+/* Lignes et totaux */
+.doc-sheet .doc-table { font-size: 11.5px; background: rgba(255, 255, 255, 0.92); border-color: #c9d1db; }
+.doc-sheet .doc-print-lines th {
+  background: var(--doc-accent) !important;
+  color: #fff !important;
+  border-color: var(--doc-accent) !important;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.doc-sheet .doc-table tbody tr:nth-child(even) { background: rgba(246, 248, 251, 0.9); }
+.doc-sheet .doc-table tbody tr:hover { background: inherit; }
+.doc-col-index { width: 6mm; text-align: center; color: var(--pp-muted); }
+.doc-print-bottom { display: grid; grid-template-columns: 1fr 1fr; gap: 6mm; align-items: start; margin: 3mm 0 4mm; }
+.doc-sheet .doc-grand-total td {
+  font-weight: 700;
+  font-size: 13px;
+  color: #fff !important;
+  background: var(--doc-accent) !important;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+.doc-amount-words { text-align: center; margin: 3mm 0; }
+.doc-terms { margin-top: 3mm; font-size: 11px; color: #374151; }
+.doc-terms p { margin: 0 0 1.5mm; }
+.doc-notes-print { white-space: pre-wrap; border-left: 3px solid var(--doc-accent); padding-left: 2mm; }
+.doc-terms-text { font-style: italic; color: var(--pp-muted); }
+
+.doc-signatures { display: flex; justify-content: space-between; gap: 8mm; margin-top: 6mm; page-break-inside: avoid; }
+.doc-signatures div { flex: 1; height: 28mm; border: 1px solid #c9d1db; padding: 1.5mm 2mm; font-size: 10.5px; color: var(--pp-muted); background: rgba(255, 255, 255, 0.92); }
 
 .doc-footer {
-  margin-top: 28px;
-  padding-top: 8px;
-  border-top: 1px solid var(--pp-border);
-  font-size: 10.5px;
+  padding-top: 2mm;
+  border-top: 1px solid var(--doc-accent);
+  font-size: 9.5px;
   text-align: center;
   color: #475467;
+  line-height: 1.4;
 }
 
-/* À l'impression, seule la pièce est visible */
+/* ---------- Réglages de mise en page ---------- */
+.doc-layout-settings { display: grid; grid-template-columns: minmax(320px, 1fr) auto; gap: 12px; align-items: start; }
+.doc-mode-list { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-bottom: 10px; }
+.doc-mode {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 6px 8px;
+  border: 1px solid var(--pp-border);
+  border-radius: 3px;
+  cursor: pointer;
+  background: #fff;
+}
+.doc-mode span { display: flex; flex-direction: column; gap: 2px; }
+.doc-mode small { color: var(--pp-muted); font-size: 11.5px; }
+.doc-mode-active { border-color: var(--pp-blue-2); background: var(--pp-hover); }
+.doc-layout-settings .doc-grid { margin-bottom: 8px; }
+.doc-layout-settings input[type='color'] { width: 60px; height: 28px; padding: 0 2px; }
+
+.doc-preview-panel { position: sticky; top: 8px; }
+/* Feuille A4 réduite à 55 % */
+.doc-preview { width: calc(210mm * 0.55); height: calc(297mm * 0.55); overflow: hidden; background: #dfe4ea; }
+.doc-preview-inner { width: 210mm; transform: scale(0.55); transform-origin: top left; }
+.doc-preview .doc-print { padding: 0; overflow: visible; }
+.doc-preview .doc-sheet { box-shadow: none; }
+
+/* ---------- Impression ---------- */
 @media print {
   body * { visibility: hidden; }
   .doc-print, .doc-print * { visibility: visible; }
-  .doc-print {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 100%;
-    max-width: none;
-    border: none;
-    box-shadow: none;
-    padding: 0;
-  }
-  .doc-print .doc-table th { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  .doc-preview-panel, .doc-preview-panel * { visibility: hidden !important; }
+  .doc-print { position: absolute; left: 0; top: 0; width: 210mm; padding: 0; overflow: visible; }
+  .doc-sheet { width: 210mm; min-height: 0; margin: 0; box-shadow: none; overflow: visible; }
+  .doc-sheet .sheet-frame { height: auto; }
+  /* Papier à en-tête répété sur chaque page */
+  .sheet-bg { position: fixed; top: 0; left: 0; width: 210mm; height: 297mm; }
+  .sheet-header { position: fixed; top: 0; left: 0; width: 210mm; }
+  .sheet-footer { position: fixed; bottom: 0; left: 0; width: 210mm; }
+  .doc-sheet tr { page-break-inside: avoid; }
   .no-print { display: none !important; }
+  /* Le reste de l'application, masqué, ne doit pas ajouter de pages blanches */
+  html, body, #root { height: auto !important; min-height: 0 !important; }
+  body:has(.doc-print) .layout { height: 0 !important; min-height: 0 !important; overflow: hidden !important; }
 }
 FIN_DU_FICHIER
 echo "OK src/documents/documents.css"
@@ -3221,6 +3573,46 @@ export function emptyLine(): DocLine {
 }
 FIN_DU_FICHIER
 echo "OK src/documents/numbering.ts"
+
+cat > src/documents/printSettings.ts <<'FIN_DU_FICHIER'
+import { defaultPrintSettings, type CompanyInfo, type PrintSettings } from './types'
+
+export function printSettingsOf(company: CompanyInfo): PrintSettings {
+  return { ...defaultPrintSettings(), ...company.print }
+}
+
+/** Le contenu imprime-t-il son propre en-tête société ? (non si le papier à en-tête le fait déjà) */
+export function usesGeneratedHeader(settings: PrintSettings): boolean {
+  return settings.mode === 'generated' || (settings.mode === 'images' && !settings.headerImg)
+}
+
+/** Réduit une image (en-tête, fond de page) pour ne pas saturer le stockage du navigateur */
+export function loadImage(file: File, maxWidth = 1654): Promise<{ dataUrl: string; ratio: number }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('Fichier illisible'))
+    reader.onload = () => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('Image illisible'))
+      img.onload = () => {
+        const scale = Math.min(1, maxWidth / img.naturalWidth)
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.round(img.naturalWidth * scale)
+        canvas.height = Math.round(img.naturalHeight * scale)
+        const ctx = canvas.getContext('2d')
+        if (!ctx) return reject(new Error('Navigateur incompatible'))
+        ctx.fillStyle = '#fff'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve({ dataUrl: canvas.toDataURL('image/jpeg', 0.85), ratio: img.naturalHeight / img.naturalWidth })
+      }
+      img.src = String(reader.result)
+    }
+    reader.readAsDataURL(file)
+  })
+}
+FIN_DU_FICHIER
+echo "OK src/documents/printSettings.ts"
 
 cat > src/documents/stockMoves.ts <<'FIN_DU_FICHIER'
 // Mouvements de stock déclenchés par les BL, les réceptions et les retours de dépôt
@@ -3592,6 +3984,44 @@ export interface PartyRecord extends Party {
   paymentTerms?: number
 }
 
+/**
+ * Mise en page des pièces imprimées :
+ * - generated : en-tête et pied de page générés à partir de la fiche société
+ * - images : votre en-tête et votre pied de page (images) en haut et en bas de chaque page
+ * - background : votre papier à en-tête complet (image A4) en fond de chaque page
+ * - preprinted : impression sur papier déjà imprimé, on réserve seulement les marges
+ */
+export type LetterheadMode = 'generated' | 'images' | 'background' | 'preprinted'
+
+export interface PrintSettings {
+  mode: LetterheadMode
+  headerImg?: string
+  footerImg?: string
+  backgroundImg?: string
+  /** Marges en millimètres (haut et bas : place réservée à l'en-tête et au pied de page) */
+  top: number
+  bottom: number
+  side: number
+  /** Mentions légales (ICE, IF, RC…) en bas de page */
+  showLegal: boolean
+  /** Couleur des titres et bandeaux */
+  accent: string
+  /** Conditions imprimées par défaut sous les devis et les factures */
+  quoteTerms: string
+  invoiceTerms: string
+}
+
+export const defaultPrintSettings = (): PrintSettings => ({
+  mode: 'generated',
+  top: 15,
+  bottom: 15,
+  side: 15,
+  showLegal: true,
+  accent: '#1f4e79',
+  quoteTerms: 'Devis valable 30 jours. Délai de livraison : selon disponibilité. Paiement : 60 jours à réception de facture.',
+  invoiceTerms: 'Paiement à 60 jours à réception de facture. Tout retard de paiement donne lieu à des pénalités conformément à la loi 69-21.',
+})
+
 /** Informations de votre entreprise, imprimées sur chaque document */
 export interface CompanyInfo extends Party {
   patente: string
@@ -3600,6 +4030,7 @@ export interface CompanyInfo extends Party {
   rib: string
   /** Logo en data URL (PNG/JPEG) */
   logo?: string
+  print?: PrintSettings
 }
 
 /** Suivi d'un implant laissé en dépôt chez une clinique */
@@ -3926,22 +4357,22 @@ cat > src/pro-theme.css <<'FIN_DU_FICHIER'
 }
 
 /* Grilles des autres écrans (tableau de bord, stock, rentabilité…) */
-.layout .content table:not(.doc-ref-table) {
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) {
   border-collapse: collapse;
   background: #fff;
   border: 1px solid var(--pp-border);
   font-size: 12.5px;
 }
-.layout .content table:not(.doc-ref-table) th {
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) th {
   background: linear-gradient(var(--pp-head-1), var(--pp-head-2));
   color: var(--pp-title);
   font-weight: 600;
   padding: 6px 8px;
   border-bottom: 1px solid #b5c1ce;
 }
-.layout .content table:not(.doc-ref-table) td { padding: 4px 8px; border-bottom: 1px solid var(--pp-border-soft); }
-.layout .content table:not(.doc-ref-table) tbody tr:nth-child(even) { background: var(--pp-zebra); }
-.layout .content table:not(.doc-ref-table) tbody tr:hover { background: var(--pp-hover); }
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) td { padding: 4px 8px; border-bottom: 1px solid var(--pp-border-soft); }
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) tbody tr:nth-child(even) { background: var(--pp-zebra); }
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) tbody tr:hover { background: var(--pp-hover); }
 
 .layout .content .card {
   background: #fff;

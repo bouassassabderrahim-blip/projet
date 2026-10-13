@@ -138,22 +138,22 @@
 }
 
 /* Grilles des autres écrans (tableau de bord, stock, rentabilité…) */
-.layout .content table:not(.doc-ref-table) {
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) {
 	border-collapse: collapse;
 	background: #fff;
 	border: 1px solid var(--pp-border);
 	font-size: 12.5px;
 }
-.layout .content table:not(.doc-ref-table) th {
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) th {
 	background: linear-gradient(var(--pp-head-1), var(--pp-head-2));
 	color: var(--pp-title);
 	font-weight: 600;
 	padding: 6px 8px;
 	border-bottom: 1px solid #b5c1ce;
 }
-.layout .content table:not(.doc-ref-table) td { padding: 4px 8px; border-bottom: 1px solid var(--pp-border-soft); }
-.layout .content table:not(.doc-ref-table) tbody tr:nth-child(even) { background: var(--pp-zebra); }
-.layout .content table:not(.doc-ref-table) tbody tr:hover { background: var(--pp-hover); }
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) td { padding: 4px 8px; border-bottom: 1px solid var(--pp-border-soft); }
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) tbody tr:nth-child(even) { background: var(--pp-zebra); }
+.layout .content table:not(.doc-ref-table):not(.sheet-frame) tbody tr:hover { background: var(--pp-hover); }
 
 .layout .content .card {
 	background: #fff;
