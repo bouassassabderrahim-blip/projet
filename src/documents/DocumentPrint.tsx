@@ -18,6 +18,33 @@ interface Props {
 	onClose?: () => void
 }
 
+/** Message d'accompagnement pour l'envoi d'une pièce (e-mail, WhatsApp) */
+function shareMessage(doc: CommercialDocument, company: CompanyInfo, netToPay: number, balance?: number): { subject: string; body: string } {
+	const title = DOC_LABELS[doc.kind].title
+	const subject = `${title} ${doc.number}${company.name ? ` – ${company.name}` : ''}`
+	const lines = [
+		'Bonjour,',
+		'',
+		`Veuillez trouver ci-joint notre ${title.toLowerCase()} n° ${doc.number} du ${frDate(doc.date)}, d'un montant de ${formatMAD(netToPay)} TTC.`,
+	]
+	if (doc.kind === 'invoice') {
+		if (balance !== undefined && balance > 0.01 && balance < netToPay) lines.push(`Reste à régler : ${formatMAD(balance)}.`)
+		if (doc.dueDate) lines.push(`Échéance : ${frDate(doc.dueDate)}.`)
+		if (company.rib) lines.push(`Règlement par virement : ${company.bank} – RIB ${company.rib}.`)
+	}
+	if (doc.kind === 'quote' && doc.dueDate) lines.push(`Ce devis est valable jusqu'au ${frDate(doc.dueDate)}.`)
+	lines.push('', 'Cordialement,', company.name)
+	return { subject, body: lines.join('\n') }
+}
+
+/** Numéro marocain au format international pour WhatsApp (06… → 2126…) */
+function whatsappNumber(phone: string): string {
+	const digits = phone.replace(/\D/g, '')
+	if (digits.startsWith('00')) return digits.slice(2)
+	if (digits.startsWith('0')) return '212' + digits.slice(1)
+	return digits
+}
+
 /** Pièce commerciale au format A4, compatible avec votre papier à en-tête */
 export default function DocumentPrint({ doc, company, paid = 0, balance, settings, embedded, onClose }: Props) {
 	const s = settings ?? printSettingsOf(company)
@@ -49,6 +76,27 @@ export default function DocumentPrint({ doc, company, paid = 0, balance, setting
 				<div className="doc-toolbar no-print">
 					<button type="button" className="btn-primary" onClick={() => window.print()}>
 						Imprimer / PDF
+					</button>
+					<button
+						type="button"
+						title="Ouvre votre messagerie : joignez le PDF enregistré avec « Imprimer / PDF »"
+						onClick={() => {
+							const m = shareMessage(doc, company, totals.netToPay, balance)
+							location.href = `mailto:${encodeURIComponent(doc.party.email)}?subject=${encodeURIComponent(m.subject)}&body=${encodeURIComponent(m.body)}`
+						}}
+					>
+						Envoyer par e-mail
+					</button>
+					<button
+						type="button"
+						title={doc.party.phone ? 'Ouvre WhatsApp avec le message prêt à envoyer' : 'Ajoutez le téléphone du client sur la pièce'}
+						disabled={!doc.party.phone}
+						onClick={() => {
+							const m = shareMessage(doc, company, totals.netToPay, balance)
+							window.open(`https://wa.me/${whatsappNumber(doc.party.phone)}?text=${encodeURIComponent(m.body)}`, '_blank', 'noopener')
+						}}
+					>
+						WhatsApp
 					</button>
 					{onClose && (
 						<button type="button" onClick={onClose}>

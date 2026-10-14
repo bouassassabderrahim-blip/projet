@@ -12,6 +12,8 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
     title: 'Pilotage',
     items: [
       { id: 'dashboard', label: 'Tableau de bord' },
+      { id: 'stats', label: 'Statistiques ventes' },
+      { id: 'schedule', label: 'Échéancier & trésorerie' },
       { id: 'products', label: 'Rentabilité produits' },
       { id: 'breakeven', label: 'Résultat & seuil' },
       { id: 'recommendations', label: 'Recommandations' },
@@ -23,6 +25,8 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
       { id: 'catalog', label: 'Mes produits' },
       { id: 'stock', label: 'Stock' },
       { id: 'alerts', label: 'Alertes stock' },
+      { id: 'movements', label: 'Mouvements de stock' },
+      { id: 'inventory', label: 'Inventaire' },
       { id: 'lots', label: 'Lots & traçabilité' },
       { id: 'kits', label: 'Kits' },
       { id: 'import', label: 'Import CSV' },

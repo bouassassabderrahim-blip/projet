@@ -1,7 +1,7 @@
 // Mouvements de stock déclenchés par les BL, les réceptions et les retours de dépôt
 import type { Product } from '../types'
 import { newId, today } from './numbering'
-import type { DocLine, StockLot } from './types'
+import type { DocLine, StockLot, StockMovement } from './types'
 
 export interface StockState {
 	products: Product[]
@@ -11,16 +11,25 @@ export interface StockState {
 export interface MoveResult extends StockState {
 	/** Articles dont le stock était insuffisant (ramené à 0) */
 	shortages: string[]
+	/** Lignes du journal des mouvements */
+	movements: StockMovement[]
 }
 
 /**
  * direction = -1 : sortie (BL validé, réception annulée)
  * direction = +1 : entrée (réception validée, BL annulé, retour de dépôt)
  */
-export function applyMove(state: StockState, lines: DocLine[], direction: 1 | -1, supplier = ''): MoveResult {
+export function applyMove(
+	state: StockState,
+	lines: DocLine[],
+	direction: 1 | -1,
+	supplier = '',
+	reference = '',
+): MoveResult {
 	const products = new Map(state.products.map((p) => [p.id, { ...p }]))
 	const lots = state.lots.map((l) => ({ ...l }))
 	const shortages: string[] = []
+	const movements: StockMovement[] = []
 
 	for (const line of lines) {
 		if (!line.productId || line.quantity <= 0) continue
@@ -63,9 +72,22 @@ export function applyMove(state: StockState, lines: DocLine[], direction: 1 | -1
 			lot.quantity = Math.max(0, lot.quantity + q)
 			if (direction > 0 && line.expiry && !lot.expiry) lot.expiry = line.expiry
 		}
+
+		movements.push({
+			id: newId(),
+			date: today(),
+			productId: line.productId,
+			productName: product?.name ?? line.description,
+			lot: line.lot ?? '',
+			serial: line.serial ?? '',
+			quantity: q,
+			kind: direction > 0 ? 'in' : 'out',
+			reference,
+			stockAfter: product?.stock,
+		})
 	}
 
-	return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages }
+	return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages, movements }
 }
 
 export type ExpiryState = 'expired' | 'soon' | 'ok' | 'none'

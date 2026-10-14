@@ -22,11 +22,15 @@ import KitsPage from './documents/KitsPage'
 import PartiesPage from './documents/PartiesPage'
 import BackupPage from './documents/BackupPage'
 import StockAlertsPage from './documents/StockAlertsPage'
+import StockMovesPage from './documents/StockMovesPage'
+import InventoryPage from './documents/InventoryPage'
+import SchedulePage from './documents/SchedulePage'
+import StatsPage from './documents/StatsPage'
 import { getStockStatus } from './utils/stock'
 import { isOverdue } from './documents/ledger'
 import { applyMove, expiryState } from './documents/stockMoves'
-import { useCompany, useDocuments, useKits, useLots, useParties } from './documents/storage'
-import type { DocKind, DocLine } from './documents/types'
+import { useCashBalance, useCompany, useDocuments, useKits, useLots, useMovements, useParties } from './documents/storage'
+import type { DocKind, DocLine, StockMovement } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
 import './theme.css'
 import './documents/documents.css'
@@ -41,6 +45,10 @@ const titles: Record<PageId, string> = {
 	catalog: 'Mes produits',
 	stock: 'Gestion du stock',
 	alerts: 'Alertes de stock',
+	movements: 'Mouvements de stock',
+	inventory: 'Inventaire physique',
+	stats: 'Statistiques des ventes',
+	schedule: 'Échéancier et trésorerie prévisionnelle',
 	products: 'Rentabilité par produit',
 	breakeven: 'Résultat & seuil de rentabilité',
 	import: 'Import de fichiers CSV',
@@ -97,6 +105,10 @@ const commercialPages = new Set<PageId>([
 	'lots',
 	'kits',
 	'alerts',
+	'movements',
+	'inventory',
+	'stats',
+	'schedule',
 	'vat',
 	'company',
 	'backup',
@@ -176,6 +188,8 @@ export default function App() {
 	const [lots, setLots] = useLots()
 	const [kits, setKits] = useKits()
 	const [parties, setParties] = useParties()
+	const [movements, setMovements] = useMovements()
+	const [cash, setCash] = useCashBalance()
 	// Bandeau d'alerte de stock masquable jusqu'au prochain chargement
 	const [alertBannerHidden, setAlertBannerHidden] = useState(false)
 
@@ -221,11 +235,16 @@ export default function App() {
 	}
 
 	// BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
-	function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string) {
-		const result = applyMove({ products, lots }, lines, direction, supplier)
+	function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) {
+		const result = applyMove({ products, lots }, lines, direction, supplier, reference)
 		handleEdit(result.products)
 		setLots(result.lots)
+		addMovements(result.movements)
 		if (result.shortages.length) alert('Stock insuffisant, ramené à 0 pour :\n' + result.shortages.join('\n'))
+	}
+
+	function addMovements(added: StockMovement[]) {
+		if (added.length) setMovements((m) => [...m, ...added])
 	}
 
 	function handleImport(imported: Product[]) {
@@ -382,6 +401,14 @@ export default function App() {
 						onNavigate={openDocument}
 						onOpenStock={() => navigate('stock')}
 					/>
+				)}
+				{page === 'movements' && <StockMovesPage movements={movements} products={products} />}
+				{page === 'inventory' && (
+					<InventoryPage products={products} onProductsChange={handleEdit} onMovements={addMovements} />
+				)}
+				{page === 'stats' && <StatsPage documents={documents} products={products} />}
+				{page === 'schedule' && (
+					<SchedulePage documents={documents} cash={cash} onCashChange={setCash} onNavigate={openDocument} />
 				)}
 				{page === 'kits' && <KitsPage kits={kits} onChange={setKits} products={products} />}
 				{page === 'vat' && <VatPage documents={documents} />}

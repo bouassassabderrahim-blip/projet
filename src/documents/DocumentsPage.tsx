@@ -38,7 +38,7 @@ interface Props {
 	openId?: string
 	onNavigate?: (kind: DocKind, openId?: string) => void
 	/** Mouvement de stock : -1 sortie, +1 entrée */
-	onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string) => void
+	onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
 }
 
 type View =
@@ -85,7 +85,9 @@ export default function DocumentsPage({
 }: Props) {
 	const [view, setView] = useState<View>(() => {
 		const doc = openId ? documents.find((d) => d.id === openId) : undefined
-		return doc ? { mode: 'edit', doc } : { mode: 'list' }
+		if (!doc) return { mode: 'list' }
+		// Une pièce validée s'ouvre en consultation, un brouillon en modification
+		return doc.status === 'draft' ? { mode: 'edit', doc } : { mode: 'print', id: doc.id }
 	})
 	const [search, setSearch] = useState('')
 	const [filter, setFilter] = useState<Filter>('')
@@ -177,20 +179,20 @@ export default function DocumentsPage({
 
 		if (status === 'validated') {
 			if (doc.kind === 'delivery') {
-				onStockMove?.(doc.lines, -1)
+				onStockMove?.(doc.lines, -1, '', doc.number)
 				// BL en dépôt : chaque ligne reste à facturer à la pose
 				if (doc.consignment)
 					next = next.map((d) =>
 						d.id === doc.id ? { ...d, lines: d.lines.map((l) => ({ ...l, depot: l.depot ?? 'depot' })) } : d,
 					)
 			}
-			if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier)
-			if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1)
+			if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, doc.number)
+			if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', doc.number)
 		}
 
 		if (status === 'cancelled' && doc.status !== 'draft') {
-			if (doc.kind === 'delivery') onStockMove?.(doc.lines.filter((l) => l.depot !== 'returned'), 1)
-			if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1)
+			if (doc.kind === 'delivery') onStockMove?.(doc.lines.filter((l) => l.depot !== 'returned'), 1, '', `Annulation ${doc.number}`)
+			if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1, '', `Annulation ${doc.number}`)
 		}
 		onChange(next)
 	}

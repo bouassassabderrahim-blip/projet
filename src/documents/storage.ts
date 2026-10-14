@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react'
-import { emptyCompany, type CommercialDocument, type CompanyInfo, type Kit, type PartyRecord, type StockLot } from './types'
+import {
+	emptyCompany,
+	type CommercialDocument,
+	type CompanyInfo,
+	type Kit,
+	type PartyRecord,
+	type StockLot,
+	type StockMovement,
+} from './types'
 
 export const DOCS_KEY = 'profitpilot:documents:v1'
 export const COMPANY_KEY = 'profitpilot:company:v1'
 export const LOTS_KEY = 'profitpilot:lots:v1'
 export const KITS_KEY = 'profitpilot:kits:v1'
 export const PARTIES_KEY = 'profitpilot:parties:v1'
+export const MOVES_KEY = 'profitpilot:movements:v1'
+export const CASH_KEY = 'profitpilot:cash:v1'
 export const LAST_BACKUP_KEY = 'profitpilot:last-backup'
 
 /** État React sauvegardé dans le localStorage, avec validation à la relecture */
@@ -71,6 +81,14 @@ export const useDocuments = () => usePersistentState<CommercialDocument[]>(DOCS_
 export const useCompany = () => usePersistentState<CompanyInfo>(COMPANY_KEY, emptyCompany, isCompany)
 export const useLots = () => usePersistentState<StockLot[]>(LOTS_KEY, () => [], isLotList)
 export const useKits = () => usePersistentState<Kit[]>(KITS_KEY, () => [], isKitList)
+const isMoveList = listOf<StockMovement>(
+	(x) => isObj(x) && typeof x.id === 'string' && typeof x.productId === 'string' && typeof x.quantity === 'number',
+)
+const isNumber = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
+
+export const useMovements = () => usePersistentState<StockMovement[]>(MOVES_KEY, () => [], isMoveList)
+/** Trésorerie disponible saisie dans l'échéancier */
+export const useCashBalance = () => usePersistentState<number>(CASH_KEY, () => 0, isNumber)
 export const useParties = () => usePersistentState<PartyRecord[]>(PARTIES_KEY, () => [], isPartyList)
 
 // ---------- Sauvegarde complète ----------

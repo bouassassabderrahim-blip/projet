@@ -167,6 +167,24 @@ export interface StockLot {
 	supplier: string
 }
 
+/** Mouvement de stock (journal) : quantité signée, + entrée / − sortie */
+export type MovementKind = 'in' | 'out' | 'adjust'
+
+export interface StockMovement {
+	id: string
+	date: string
+	productId: string
+	productName: string
+	lot: string
+	serial: string
+	quantity: number
+	kind: MovementKind
+	/** Pièce ou motif : « BL-2026-0003 », « Inventaire du 14/10/2026 »… */
+	reference: string
+	/** Stock de l'article après le mouvement */
+	stockAfter?: number
+}
+
 export interface Kit {
 	id: string
 	name: string

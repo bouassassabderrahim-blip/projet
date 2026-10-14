@@ -8,6 +8,7 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 
 
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { downloadFile } from './csv'
@@ -364,7 +365,7 @@ interface Props {
   documents: CommercialDocument[]
   onChange: (docs: CommercialDocument[]) => void
   onNavigate: (kind: DocKind, openId?: string) => void
-  onStockMove: (lines: DocLine[], direction: 1 | -1) => void
+  onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
 }
 
 interface DepotItem {
@@ -431,7 +432,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
   function giveBack(item: DepotItem) {
     if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
     onChange(setDepot(documents, [item], 'returned'))
-    onStockMove([item.line], 1)
+    onStockMove([item.line], 1, '', `Retour dépôt ${item.bl.number}`)
   }
 
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
@@ -994,6 +995,33 @@ interface Props {
   onClose?: () => void
 }
 
+/** Message d'accompagnement pour l'envoi d'une pièce (e-mail, WhatsApp) */
+function shareMessage(doc: CommercialDocument, company: CompanyInfo, netToPay: number, balance?: number): { subject: string; body: string } {
+  const title = DOC_LABELS[doc.kind].title
+  const subject = `${title} ${doc.number}${company.name ? ` – ${company.name}` : ''}`
+  const lines = [
+    'Bonjour,',
+    '',
+    `Veuillez trouver ci-joint notre ${title.toLowerCase()} n° ${doc.number} du ${frDate(doc.date)}, d'un montant de ${formatMAD(netToPay)} TTC.`,
+  ]
+  if (doc.kind === 'invoice') {
+    if (balance !== undefined && balance > 0.01 && balance < netToPay) lines.push(`Reste à régler : ${formatMAD(balance)}.`)
+    if (doc.dueDate) lines.push(`Échéance : ${frDate(doc.dueDate)}.`)
+    if (company.rib) lines.push(`Règlement par virement : ${company.bank} – RIB ${company.rib}.`)
+  }
+  if (doc.kind === 'quote' && doc.dueDate) lines.push(`Ce devis est valable jusqu'au ${frDate(doc.dueDate)}.`)
+  lines.push('', 'Cordialement,', company.name)
+  return { subject, body: lines.join('\n') }
+}
+
+/** Numéro marocain au format international pour WhatsApp (06… → 2126…) */
+function whatsappNumber(phone: string): string {
+  const digits = phone.replace(/\D/g, '')
+  if (digits.startsWith('00')) return digits.slice(2)
+  if (digits.startsWith('0')) return '212' + digits.slice(1)
+  return digits
+}
+
 /** Pièce commerciale au format A4, compatible avec votre papier à en-tête */
 export default function DocumentPrint({ doc, company, paid = 0, balance, settings, embedded, onClose }: Props) {
   const s = settings ?? printSettingsOf(company)
@@ -1025,6 +1053,27 @@ export default function DocumentPrint({ doc, company, paid = 0, balance, setting
         <div className="doc-toolbar no-print">
           <button type="button" className="btn-primary" onClick={() => window.print()}>
             Imprimer / PDF
+          </button>
+          <button
+            type="button"
+            title="Ouvre votre messagerie : joignez le PDF enregistré avec « Imprimer / PDF »"
+            onClick={() => {
+              const m = shareMessage(doc, company, totals.netToPay, balance)
+              location.href = `mailto:${encodeURIComponent(doc.party.email)}?subject=${encodeURIComponent(m.subject)}&body=${encodeURIComponent(m.body)}`
+            }}
+          >
+            Envoyer par e-mail
+          </button>
+          <button
+            type="button"
+            title={doc.party.phone ? 'Ouvre WhatsApp avec le message prêt à envoyer' : 'Ajoutez le téléphone du client sur la pièce'}
+            disabled={!doc.party.phone}
+            onClick={() => {
+              const m = shareMessage(doc, company, totals.netToPay, balance)
+              window.open(`https://wa.me/${whatsappNumber(doc.party.phone)}?text=${encodeURIComponent(m.body)}`, '_blank', 'noopener')
+            }}
+          >
+            WhatsApp
           </button>
           {onClose && (
             <button type="button" onClick={onClose}>
@@ -1266,7 +1315,7 @@ interface Props {
   openId?: string
   onNavigate?: (kind: DocKind, openId?: string) => void
   /** Mouvement de stock : -1 sortie, +1 entrée */
-  onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string) => void
+  onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
 }
 
 type View =
@@ -1313,7 +1362,9 @@ export default function DocumentsPage({
 }: Props) {
   const [view, setView] = useState<View>(() => {
     const doc = openId ? documents.find((d) => d.id === openId) : undefined
-    return doc ? { mode: 'edit', doc } : { mode: 'list' }
+    if (!doc) return { mode: 'list' }
+    // Une pièce validée s'ouvre en consultation, un brouillon en modification
+    return doc.status === 'draft' ? { mode: 'edit', doc } : { mode: 'print', id: doc.id }
   })
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<Filter>('')
@@ -1405,20 +1456,20 @@ export default function DocumentsPage({
 
     if (status === 'validated') {
       if (doc.kind === 'delivery') {
-        onStockMove?.(doc.lines, -1)
+        onStockMove?.(doc.lines, -1, '', doc.number)
         // BL en dépôt : chaque ligne reste à facturer à la pose
         if (doc.consignment)
           next = next.map((d) =>
             d.id === doc.id ? { ...d, lines: d.lines.map((l) => ({ ...l, depot: l.depot ?? 'depot' })) } : d,
           )
       }
-      if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier)
-      if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1)
+      if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, doc.number)
+      if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', doc.number)
     }
 
     if (status === 'cancelled' && doc.status !== 'draft') {
-      if (doc.kind === 'delivery') onStockMove?.(doc.lines.filter((l) => l.depot !== 'returned'), 1)
-      if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1)
+      if (doc.kind === 'delivery') onStockMove?.(doc.lines.filter((l) => l.depot !== 'returned'), 1, '', `Annulation ${doc.number}`)
+      if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1, '', `Annulation ${doc.number}`)
     }
     onChange(next)
   }
@@ -1733,6 +1784,157 @@ export default function DocumentsPage({
 }
 FIN_DU_FICHIER
 echo "OK src/documents/DocumentsPage.tsx"
+
+cat > src/documents/InventoryPage.tsx <<'FIN_DU_FICHIER'
+import { useMemo, useState } from 'react'
+import type { Product } from '../types'
+import { downloadCsv } from './csv'
+import { frDate, newId, today } from './numbering'
+import { formatMAD, round2 } from './tva'
+import type { StockMovement } from './types'
+import './documents.css'
+
+interface Props {
+  products: Product[]
+  onProductsChange: (products: Product[]) => void
+  onMovements: (movements: StockMovement[]) => void
+}
+
+/** Inventaire physique : saisie des quantités comptées, écarts valorisés, mise à jour du stock */
+export default function InventoryPage({ products, onProductsChange, onMovements }: Props) {
+  const [counts, setCounts] = useState<Record<string, string>>({})
+  const [query, setQuery] = useState('')
+  const [onlyGaps, setOnlyGaps] = useState(false)
+  const [message, setMessage] = useState('')
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return products
+      .filter((p) => !q || [p.name, p.reference, p.category].join(' ').toLowerCase().includes(q))
+      .map((p) => {
+        const raw = counts[p.id]
+        const counted = raw === undefined || raw.trim() === '' ? undefined : Math.max(0, Math.round(Number(raw.replace(',', '.'))))
+        const theoretical = p.stock ?? 0
+        const gap = counted === undefined || !Number.isFinite(counted) ? undefined : counted - theoretical
+        return { product: p, theoretical, counted, gap }
+      })
+      .filter((r) => !onlyGaps || (r.gap !== undefined && r.gap !== 0))
+  }, [products, counts, query, onlyGaps])
+
+  const changed = rows.filter((r) => r.gap !== undefined && r.gap !== 0)
+  const gapValue = round2(changed.reduce((s, r) => s + (r.gap ?? 0) * r.product.unitCost, 0))
+  const stockValue = round2(products.reduce((s, p) => s + (p.stock ?? 0) * p.unitCost, 0))
+
+  function validate() {
+    const entered = rows.filter((r) => r.counted !== undefined && Number.isFinite(r.counted))
+    if (entered.length === 0) return setMessage('Saisissez au moins une quantité comptée.')
+    if (!confirm(`Mettre à jour le stock de ${entered.length} article(s) d'après le comptage ?`)) return
+    const date = today()
+    const reference = `Inventaire du ${frDate(date)}`
+    const byId = new Map(entered.map((r) => [r.product.id, r]))
+    onProductsChange(products.map((p) => (byId.has(p.id) ? { ...p, stock: byId.get(p.id)!.counted } : p)))
+    onMovements(
+      entered
+        .filter((r) => r.gap !== 0 || r.product.stock === undefined)
+        .map((r) => ({
+          id: newId(),
+          date,
+          productId: r.product.id,
+          productName: r.product.name,
+          lot: '',
+          serial: '',
+          quantity: r.gap ?? 0,
+          kind: 'adjust' as const,
+          reference,
+          stockAfter: r.counted,
+        })),
+    )
+    setCounts({})
+    setMessage(`${reference} validé : ${entered.length} article(s) mis à jour, écart ${formatMAD(gapValue)}.`)
+  }
+
+  function exportSheet() {
+    downloadCsv(`feuille-inventaire-${today()}.csv`, [
+      ['Référence', 'Article', 'Catégorie', 'Stock théorique', 'Quantité comptée', 'Écart'],
+      ...products.map((p) => [p.reference ?? '', p.name, p.category, String(p.stock ?? 0), '', '']),
+    ])
+  }
+
+  return (
+    <div>
+      <div className="doc-stats">
+        <div>
+          <span>Valeur du stock (coût d'achat)</span>
+          <strong>{formatMAD(stockValue)}</strong>
+        </div>
+        <div>
+          <span>Articles avec écart</span>
+          <strong>{changed.length}</strong>
+        </div>
+        <div className={gapValue < 0 ? 'doc-stat-danger' : undefined}>
+          <span>Valeur des écarts</span>
+          <strong>{formatMAD(gapValue)}</strong>
+        </div>
+      </div>
+
+      <div className="doc-toolbar">
+        <input className="doc-search" placeholder="Rechercher un article…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <label className="doc-check">
+          <input type="checkbox" checked={onlyGaps} onChange={(e) => setOnlyGaps(e.target.checked)} /> Écarts seulement
+        </label>
+        <button type="button" onClick={exportSheet}>
+          Feuille de comptage (CSV)
+        </button>
+        <button type="button" className="btn-primary" onClick={validate}>
+          Valider l'inventaire
+        </button>
+      </div>
+      {message && <p className="doc-info">{message}</p>}
+
+      <div className="doc-table-wrap">
+        <table className="doc-table">
+          <thead>
+            <tr>
+              <th>Référence</th>
+              <th>Article</th>
+              <th>Catégorie</th>
+              <th className="num">Stock théorique</th>
+              <th className="num">Quantité comptée</th>
+              <th className="num">Écart</th>
+              <th className="num">Valeur de l'écart</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.product.id} className={r.gap ? (r.gap < 0 ? 'doc-row-danger' : 'doc-row-late') : undefined}>
+                <td>{r.product.reference}</td>
+                <td>{r.product.name}</td>
+                <td>{r.product.category}</td>
+                <td className="num">{r.product.stock ?? '—'}</td>
+                <td className="num">
+                  <input
+                    className="num doc-qty"
+                    type="number"
+                    min={0}
+                    value={counts[r.product.id] ?? ''}
+                    onChange={(e) => setCounts({ ...counts, [r.product.id]: e.target.value })}
+                  />
+                </td>
+                <td className="num">{r.gap === undefined ? '' : r.gap > 0 ? `+${r.gap}` : r.gap}</td>
+                <td className="num">{r.gap ? formatMAD(round2(r.gap * r.product.unitCost)) : ''}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="doc-count">
+        Les articles laissés vides ne sont pas modifiés. Chaque écart est enregistré dans les mouvements de stock.
+      </p>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/InventoryPage.tsx"
 
 cat > src/documents/KitsPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
@@ -2717,6 +2919,605 @@ export default function ReminderPrint({ company, party, invoices, onClose }: Pro
 FIN_DU_FICHIER
 echo "OK src/documents/ReminderPrint.tsx"
 
+cat > src/documents/SchedulePage.tsx <<'FIN_DU_FICHIER'
+import { useMemo, useState } from 'react'
+import { downloadCsv } from './csv'
+import { balanceOf, isActive } from './ledger'
+import { addDays, daysBetween, frDate, today } from './numbering'
+import { formatMAD, round2 } from './tva'
+import type { CommercialDocument, DocKind } from './types'
+import './documents.css'
+
+interface Props {
+  documents: CommercialDocument[]
+  cash: number
+  onCashChange: (cash: number) => void
+  onNavigate: (kind: DocKind, openId?: string) => void
+}
+
+interface Entry {
+  doc: CommercialDocument
+  amount: number // + encaissement, − décaissement
+  due: string
+  late: number // jours de retard (0 si non échu)
+}
+
+const BUCKETS = [
+  { key: 'late', label: 'Échu' },
+  { key: 'w1', label: '7 prochains jours' },
+  { key: 'd30', label: '8 à 30 jours' },
+  { key: 'd60', label: '31 à 60 jours' },
+  { key: 'd90', label: '61 à 90 jours' },
+  { key: 'later', label: 'Au-delà de 90 jours' },
+] as const
+
+type BucketKey = (typeof BUCKETS)[number]['key']
+
+function bucketOf(due: string, now: string): BucketKey {
+  if (due < now) return 'late'
+  const d = daysBetween(now, due)
+  if (d <= 7) return 'w1'
+  if (d <= 30) return 'd30'
+  if (d <= 60) return 'd60'
+  if (d <= 90) return 'd90'
+  return 'later'
+}
+
+const AGES = [
+  { label: 'Non échu', test: (late: number) => late === 0 },
+  { label: '1 à 30 j', test: (late: number) => late > 0 && late <= 30 },
+  { label: '31 à 60 j', test: (late: number) => late > 30 && late <= 60 },
+  { label: '61 à 90 j', test: (late: number) => late > 60 && late <= 90 },
+  { label: '+ 90 j', test: (late: number) => late > 90 },
+]
+
+/** Échéancier clients / fournisseurs, trésorerie prévisionnelle et balance âgée */
+export default function SchedulePage({ documents, cash, onCashChange, onNavigate }: Props) {
+  const now = today()
+  const [cashText, setCashText] = useState(String(cash))
+  const [side, setSide] = useState<'all' | 'in' | 'out'>('all')
+
+  const entries = useMemo<Entry[]>(() => {
+    const list: Entry[] = []
+    for (const d of documents) {
+      if ((d.kind !== 'invoice' && d.kind !== 'bill') || !isActive(d)) continue
+      const balance = balanceOf(d, documents)
+      if (balance <= 0.01) continue
+      const due = d.dueDate || addDays(d.date, 60)
+      list.push({ doc: d, amount: d.kind === 'invoice' ? balance : -balance, due, late: due < now ? daysBetween(due, now) : 0 })
+    }
+    return list.sort((a, b) => a.due.localeCompare(b.due))
+  }, [documents, now])
+
+  // Trésorerie prévisionnelle : solde cumulé tranche par tranche
+  const forecast = useMemo(() => {
+    const rows: { key: BucketKey; label: string; inflow: number; outflow: number; balance: number }[] = []
+    for (const b of BUCKETS) {
+      const items = entries.filter((e) => bucketOf(e.due, now) === b.key)
+      const inflow = round2(items.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0))
+      const outflow = round2(items.filter((e) => e.amount < 0).reduce((s, e) => s - e.amount, 0))
+      const previous = rows.length ? rows[rows.length - 1].balance : cash
+      rows.push({ key: b.key, label: b.label, inflow, outflow, balance: round2(previous + inflow - outflow) })
+    }
+    return rows
+  }, [entries, cash, now])
+
+  // Balance âgée des clients
+  const aged = useMemo(() => {
+    const byClient = new Map<string, number[]>()
+    for (const e of entries) {
+      if (e.amount <= 0) continue
+      const row = byClient.get(e.doc.party.name) ?? AGES.map(() => 0)
+      row[AGES.findIndex((a) => a.test(e.late))] += e.amount
+      byClient.set(e.doc.party.name, row)
+    }
+    return [...byClient.entries()]
+      .map(([name, cols]) => ({ name, cols: cols.map(round2), total: round2(cols.reduce((s, v) => s + v, 0)) }))
+      .sort((a, b) => b.total - a.total)
+  }, [entries])
+
+  const toCollect = round2(entries.filter((e) => e.amount > 0).reduce((s, e) => s + e.amount, 0))
+  const toPay = round2(entries.filter((e) => e.amount < 0).reduce((s, e) => s - e.amount, 0))
+  const shown = entries.filter((e) => side === 'all' || (side === 'in' ? e.amount > 0 : e.amount < 0))
+
+  function saveCash(text: string) {
+    setCashText(text)
+    const n = Number(text.replace(/\s/g, '').replace(',', '.'))
+    if (Number.isFinite(n)) onCashChange(n)
+  }
+
+  function exportCsv() {
+    downloadCsv(`echeancier-${now}.csv`, [
+      ['Échéance', 'Sens', 'Pièce', 'Tiers', 'Montant', 'Retard (jours)'],
+      ...entries.map((e) => [e.due, e.amount > 0 ? 'Encaissement' : 'Décaissement', e.doc.number, e.doc.party.name, Math.abs(e.amount), String(e.late)]),
+    ])
+  }
+
+  return (
+    <div>
+      <div className="doc-stats">
+        <div>
+          <span>Trésorerie disponible</span>
+          <input className="num doc-cash-input" value={cashText} onChange={(e) => saveCash(e.target.value)} aria-label="Trésorerie disponible" />
+        </div>
+        <div>
+          <span>À encaisser (clients)</span>
+          <strong>{formatMAD(toCollect)}</strong>
+        </div>
+        <div>
+          <span>À payer (fournisseurs)</span>
+          <strong>{formatMAD(toPay)}</strong>
+        </div>
+        <div className={cash + toCollect - toPay < 0 ? 'doc-stat-danger' : undefined}>
+          <span>Solde prévisionnel</span>
+          <strong>{formatMAD(round2(cash + toCollect - toPay))}</strong>
+        </div>
+      </div>
+
+      <div className="doc-panel">
+        <div className="doc-panel-title">Trésorerie prévisionnelle</div>
+        <table className="doc-table">
+          <thead>
+            <tr>
+              <th>Période</th>
+              <th className="num">Encaissements</th>
+              <th className="num">Décaissements</th>
+              <th className="num">Solde cumulé</th>
+            </tr>
+          </thead>
+          <tbody>
+            {forecast.map((f) => (
+              <tr key={f.key} className={f.balance < 0 ? 'doc-row-danger' : undefined}>
+                <td>{f.label}</td>
+                <td className="num">{f.inflow ? formatMAD(f.inflow) : ''}</td>
+                <td className="num">{f.outflow ? formatMAD(f.outflow) : ''}</td>
+                <td className="num">
+                  <strong>{formatMAD(f.balance)}</strong>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="doc-count">
+          Les montants échus sont supposés réglés immédiatement ; la trésorerie de départ se saisit en haut à gauche.
+        </p>
+      </div>
+
+      {aged.length > 0 && (
+        <div className="doc-panel">
+          <div className="doc-panel-title">Balance âgée des clients</div>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Client</th>
+                {AGES.map((a) => (
+                  <th key={a.label} className="num">
+                    {a.label}
+                  </th>
+                ))}
+                <th className="num">Total dû</th>
+              </tr>
+            </thead>
+            <tbody>
+              {aged.map((r) => (
+                <tr key={r.name} className={r.cols[4] > 0 ? 'doc-row-danger' : r.cols.slice(1).some((v) => v > 0) ? 'doc-row-late' : undefined}>
+                  <td>{r.name}</td>
+                  {r.cols.map((v, i) => (
+                    <td key={i} className="num">
+                      {v ? formatMAD(v) : ''}
+                    </td>
+                  ))}
+                  <td className="num">
+                    <strong>{formatMAD(r.total)}</strong>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <div className="doc-toolbar">
+        <select value={side} onChange={(e) => setSide(e.target.value as 'all' | 'in' | 'out')}>
+          <option value="all">Encaissements et décaissements</option>
+          <option value="in">Encaissements clients</option>
+          <option value="out">Règlements fournisseurs</option>
+        </select>
+        <button type="button" onClick={exportCsv}>
+          Exporter l'échéancier (CSV)
+        </button>
+        <span className="doc-count">{shown.length} échéance(s)</span>
+      </div>
+
+      {shown.length === 0 ? (
+        <p className="doc-empty">Aucune échéance ouverte.</p>
+      ) : (
+        <div className="doc-table-wrap">
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Échéance</th>
+                <th>Sens</th>
+                <th>Pièce</th>
+                <th>Tiers</th>
+                <th className="num">Montant</th>
+                <th className="num">Retard</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {shown.map((e) => (
+                <tr key={e.doc.id} className={e.late ? 'doc-row-late' : undefined}>
+                  <td>{frDate(e.due)}</td>
+                  <td>
+                    <span className={`doc-badge ${e.amount > 0 ? 'doc-exp-ok' : 'doc-badge-validated'}`}>
+                      {e.amount > 0 ? 'Encaissement' : 'Décaissement'}
+                    </span>
+                  </td>
+                  <td>{e.doc.number}</td>
+                  <td>{e.doc.party.name}</td>
+                  <td className="num">{formatMAD(Math.abs(e.amount))}</td>
+                  <td className="num">{e.late ? `${e.late} j` : ''}</td>
+                  <td>
+                    <button type="button" onClick={() => onNavigate(e.doc.kind, e.doc.id)}>
+                      Ouvrir
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/SchedulePage.tsx"
+
+cat > src/documents/StatsPage.tsx <<'FIN_DU_FICHIER'
+import { useMemo, useState } from 'react'
+import type { Product } from '../types'
+import { isActive, sign } from './ledger'
+import { computeTotals, formatMAD, lineHT, round2 } from './tva'
+import type { CommercialDocument } from './types'
+import './documents.css'
+
+interface Props {
+  documents: CommercialDocument[]
+  products: Product[]
+}
+
+const MONTHS = ['Janv.', 'Févr.', 'Mars', 'Avr.', 'Mai', 'Juin', 'Juil.', 'Août', 'Sept.', 'Oct.', 'Nov.', 'Déc.']
+const MONTHS_LONG = ['Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin', 'Juillet', 'Août', 'Septembre', 'Octobre', 'Novembre', 'Décembre']
+
+const pct = (v: number) => `${v.toLocaleString('fr-FR', { maximumFractionDigits: 1 })} %`
+
+/** Valeurs d'axe arrondies et compactes : 0 / 10 k / 20 k… */
+function niceTicks(max: number): number[] {
+  if (max <= 0) return [0]
+  const rough = max / 4
+  const pow = 10 ** Math.floor(Math.log10(rough))
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * pow).find((s) => s >= rough) ?? rough
+  const ticks: number[] = []
+  for (let v = 0; v <= max + step * 0.001; v += step) ticks.push(v)
+  if (ticks[ticks.length - 1] < max) ticks.push(ticks[ticks.length - 1] + step)
+  return ticks
+}
+
+const compact = (v: number) =>
+  v >= 1e6 ? `${(v / 1e6).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} M` : v >= 1000 ? `${(v / 1000).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} k` : String(v)
+
+interface MonthPoint {
+  month: number
+  ht: number
+  count: number
+}
+
+/** Histogramme du CA HT mensuel : une seule série, survol et focus clavier sur chaque colonne */
+function MonthlyChart({ data }: { data: MonthPoint[] }) {
+  const [hover, setHover] = useState<number | null>(null)
+  const W = 760
+  const H = 260
+  const pad = { top: 22, right: 12, bottom: 28, left: 52 }
+  const innerW = W - pad.left - pad.right
+  const innerH = H - pad.top - pad.bottom
+  const max = Math.max(...data.map((d) => d.ht), 0)
+  const ticks = niceTicks(max)
+  const top = ticks[ticks.length - 1] || 1
+  const band = innerW / data.length
+  // Le SVG s'agrandit avec la page : 16 unités ≈ 24 px sur un écran large
+  const barW = Math.min(16, band * 0.5)
+  const y = (v: number) => pad.top + innerH - (Math.max(v, 0) / top) * innerH
+  const best = data.reduce((m, d, i) => (d.ht > data[m].ht ? i : m), 0)
+
+  return (
+    <div className="stats-chart">
+      <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Chiffre d'affaires HT par mois">
+        {ticks.map((t) => (
+          <g key={t}>
+            <line x1={pad.left} x2={W - pad.right} y1={y(t)} y2={y(t)} className="stats-grid" />
+            <text x={pad.left - 8} y={y(t)} className="stats-tick" textAnchor="end" dominantBaseline="middle">
+              {compact(t)}
+            </text>
+          </g>
+        ))}
+        {data.map((d, i) => {
+          const cx = pad.left + band * i + band / 2
+          const h = Math.max(pad.top + innerH - y(d.ht), 0)
+          const r = Math.min(4, h)
+          const x0 = cx - barW / 2
+          const yTop = pad.top + innerH - h
+          // Bout arrondi de 4 px côté valeur, angle droit sur la ligne de base
+          const path = h
+            ? `M${x0},${pad.top + innerH} V${yTop + r} Q${x0},${yTop} ${x0 + r},${yTop} H${x0 + barW - r} Q${x0 + barW},${yTop} ${x0 + barW},${yTop + r} V${pad.top + innerH} Z`
+            : ''
+          return (
+            <g
+              key={d.month}
+              tabIndex={0}
+              className={`stats-bar ${hover === i ? 'stats-bar-active' : ''}`}
+              onPointerEnter={() => setHover(i)}
+              onPointerLeave={() => setHover(null)}
+              onFocus={() => setHover(i)}
+              onBlur={() => setHover(null)}
+            >
+              {/* Zone de survol plus large que la colonne */}
+              <rect x={pad.left + band * i} y={pad.top} width={band} height={innerH} fill="transparent" />
+              {path && <path d={path} className="stats-bar-fill" />}
+              {i === best && d.ht > 0 && (
+                <text x={cx} y={yTop - 6} textAnchor="middle" className="stats-label">
+                  {compact(round2(d.ht))}
+                </text>
+              )}
+              <text x={cx} y={H - 8} textAnchor="middle" className="stats-tick">
+                {MONTHS[d.month]}
+              </text>
+            </g>
+          )
+        })}
+        <line x1={pad.left} x2={W - pad.right} y1={pad.top + innerH} y2={pad.top + innerH} className="stats-axis" />
+      </svg>
+      {hover !== null && (
+        <div className="stats-tooltip" style={{ left: `${((pad.left + band * hover + band / 2) / W) * 100}%` }}>
+          <strong>{formatMAD(round2(data[hover].ht))}</strong>
+          <span>
+            {MONTHS_LONG[data[hover].month]} · {data[hover].count} facture(s)
+          </span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Statistiques de ventes : CA mensuel, marge, meilleurs clients et articles */
+export default function StatsPage({ documents, products }: Props) {
+  const years = useMemo(() => {
+    const set = new Set<number>([new Date().getFullYear()])
+    for (const d of documents) if (d.kind === 'invoice') set.add(Number(d.date.slice(0, 4)))
+    return [...set].sort((a, b) => b - a)
+  }, [documents])
+  const [year, setYear] = useState(years[0])
+  const [showTable, setShowTable] = useState(false)
+
+  const stats = useMemo(() => {
+    const cost = new Map(products.map((p) => [p.id, p.unitCost]))
+    const months: MonthPoint[] = MONTHS.map((_, month) => ({ month, ht: 0, count: 0 }))
+    const clients = new Map<string, { ht: number; count: number }>()
+    const items = new Map<string, { name: string; qty: number; ht: number; cost: number; costKnown: boolean }>()
+    const coverage = new Map<string, number>()
+    let ht = 0
+    let margin = 0
+    let count = 0
+    let previous = 0
+    const thisYear = String(year)
+    const lastYear = String(year - 1)
+    const sameDay = new Date().toISOString().slice(4, 10)
+
+    for (const d of documents) {
+      if ((d.kind !== 'invoice' && d.kind !== 'credit') || !isActive(d)) continue
+      const k = sign(d)
+      const t = computeTotals(d)
+      // Même période de l'année précédente, pour la comparaison
+      if (d.date.startsWith(lastYear) && d.date.slice(4) <= sameDay) previous += k * t.totalHT
+      if (!d.date.startsWith(thisYear)) continue
+
+      const m = months[Number(d.date.slice(5, 7)) - 1]
+      m.ht += k * t.totalHT
+      ht += k * t.totalHT
+      if (d.kind === 'invoice') {
+        m.count++
+        count++
+      }
+      const c = clients.get(d.party.name) ?? { ht: 0, count: 0 }
+      c.ht += k * t.totalHT
+      if (d.kind === 'invoice') c.count++
+      clients.set(d.party.name, c)
+      const cov = d.intervention?.coverage || 'Non renseigné'
+      coverage.set(cov, (coverage.get(cov) ?? 0) + k * t.totalHT)
+
+      for (const l of d.lines) {
+        const lht = k * lineHT(l)
+        const unit = l.productId ? cost.get(l.productId) : undefined
+        const lcost = unit === undefined ? 0 : k * unit * l.quantity
+        margin += lht - lcost
+        const key = l.productId ?? `libre:${l.description}`
+        const it = items.get(key) ?? { name: l.description, qty: 0, ht: 0, cost: 0, costKnown: unit !== undefined }
+        it.qty += k * l.quantity
+        it.ht += lht
+        it.cost += lcost
+        items.set(key, it)
+      }
+    }
+
+    const topClients = [...clients.entries()].map(([name, v]) => ({ name, ...v })).sort((a, b) => b.ht - a.ht).slice(0, 10)
+    const topItems = [...items.values()].sort((a, b) => b.ht - a.ht).slice(0, 10)
+    const coverageRows = [...coverage.entries()].sort((a, b) => b[1] - a[1])
+    return { months, ht, margin, count, previous, topClients, topItems, coverageRows }
+  }, [documents, products, year])
+
+  const rate = stats.ht ? (stats.margin / stats.ht) * 100 : 0
+  const growth = stats.previous ? ((stats.ht - stats.previous) / Math.abs(stats.previous)) * 100 : null
+  const maxClient = Math.max(...stats.topClients.map((c) => c.ht), 1)
+
+  return (
+    <div>
+      <div className="doc-toolbar">
+        <label>
+          Exercice{' '}
+          <select value={year} onChange={(e) => setYear(Number(e.target.value))}>
+            {years.map((y) => (
+              <option key={y} value={y}>
+                {y}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="doc-count">Factures validées, avoirs déduits. Marge = prix de vente HT − coût d'achat des articles.</span>
+      </div>
+
+      <div className="doc-stats">
+        <div>
+          <span>Chiffre d'affaires HT</span>
+          <strong>{formatMAD(round2(stats.ht))}</strong>
+          {growth !== null && year === years[0] && (
+            <small className={growth >= 0 ? 'doc-credit' : 'doc-error'}>
+              {growth >= 0 ? '+' : ''}
+              {pct(growth)} vs même période {year - 1}
+            </small>
+          )}
+        </div>
+        <div>
+          <span>Marge brute</span>
+          <strong>{formatMAD(round2(stats.margin))}</strong>
+        </div>
+        <div>
+          <span>Taux de marge</span>
+          <strong>{pct(rate)}</strong>
+        </div>
+        <div>
+          <span>Factures · panier moyen HT</span>
+          <strong>
+            {stats.count} · {formatMAD(stats.count ? round2(stats.ht / stats.count) : 0)}
+          </strong>
+        </div>
+      </div>
+
+      <div className="doc-panel">
+        <div className="doc-panel-title stats-title">
+          Chiffre d'affaires HT par mois — {year}
+          <button type="button" onClick={() => setShowTable(!showTable)}>
+            {showTable ? 'Voir le graphique' : 'Voir le tableau'}
+          </button>
+        </div>
+        {showTable ? (
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Mois</th>
+                <th className="num">Factures</th>
+                <th className="num">CA HT</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.months.map((m) => (
+                <tr key={m.month}>
+                  <td>{MONTHS_LONG[m.month]}</td>
+                  <td className="num">{m.count}</td>
+                  <td className="num">{formatMAD(round2(m.ht))}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <MonthlyChart data={stats.months} />
+        )}
+      </div>
+
+      <div className="stats-columns">
+        <div className="doc-panel">
+          <div className="doc-panel-title">Meilleurs clients</div>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Client</th>
+                <th className="num">Factures</th>
+                <th className="num">CA HT</th>
+                <th className="num">Part</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {stats.topClients.map((c) => (
+                <tr key={c.name}>
+                  <td>{c.name}</td>
+                  <td className="num">{c.count}</td>
+                  <td className="num">{formatMAD(round2(c.ht))}</td>
+                  <td className="num">{stats.ht ? pct((c.ht / stats.ht) * 100) : ''}</td>
+                  <td className="stats-bar-cell">
+                    <div className="stats-inline-bar" style={{ width: `${Math.max((c.ht / maxClient) * 100, 0)}%` }} />
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="doc-panel">
+          <div className="doc-panel-title">CA par prise en charge</div>
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Prise en charge</th>
+                <th className="num">CA HT</th>
+                <th className="num">Part</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stats.coverageRows.map(([cov, v]) => (
+                <tr key={cov}>
+                  <td>{cov}</td>
+                  <td className="num">{formatMAD(round2(v))}</td>
+                  <td className="num">{stats.ht ? pct((v / stats.ht) * 100) : ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div className="doc-panel">
+        <div className="doc-panel-title">Articles les plus vendus</div>
+        <table className="doc-table">
+          <thead>
+            <tr>
+              <th>Article</th>
+              <th className="num">Quantité</th>
+              <th className="num">CA HT</th>
+              <th className="num">Marge</th>
+              <th className="num">Taux de marge</th>
+            </tr>
+          </thead>
+          <tbody>
+            {stats.topItems.map((it) => (
+              <tr key={it.name}>
+                <td>{it.name}</td>
+                <td className="num">{it.qty}</td>
+                <td className="num">{formatMAD(round2(it.ht))}</td>
+                <td className="num">{it.costKnown ? formatMAD(round2(it.ht - it.cost)) : '—'}</td>
+                <td className="num">{it.costKnown && it.ht ? pct(((it.ht - it.cost) / it.ht) * 100) : '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className="doc-count">« — » : ligne saisie librement, sans article du catalogue, donc sans coût d'achat connu.</p>
+      </div>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/StatsPage.tsx"
+
 cat > src/documents/StockAlertsPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo } from 'react'
 import type { Product } from '../types'
@@ -2972,6 +3773,141 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
 }
 FIN_DU_FICHIER
 echo "OK src/documents/StockAlertsPage.tsx"
+
+cat > src/documents/StockMovesPage.tsx <<'FIN_DU_FICHIER'
+import { useMemo, useState } from 'react'
+import type { Product } from '../types'
+import { downloadCsv } from './csv'
+import { frDate } from './numbering'
+import type { MovementKind, StockMovement } from './types'
+import './documents.css'
+
+interface Props {
+  movements: StockMovement[]
+  products: Product[]
+}
+
+const KIND_LABELS: Record<MovementKind, string> = { in: 'Entrée', out: 'Sortie', adjust: 'Inventaire' }
+
+/** Journal des mouvements de stock : réceptions, livraisons, retours, inventaires */
+export default function StockMovesPage({ movements, products }: Props) {
+  const [productId, setProductId] = useState('')
+  const [kind, setKind] = useState<MovementKind | ''>('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const [query, setQuery] = useState('')
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return movements
+      .filter((m) => !productId || m.productId === productId)
+      .filter((m) => !kind || m.kind === kind)
+      .filter((m) => (!from || m.date >= from) && (!to || m.date <= to))
+      .filter((m) => !q || [m.productName, m.lot, m.serial, m.reference].join(' ').toLowerCase().includes(q))
+      .slice()
+      .reverse()
+  }, [movements, productId, kind, from, to, query])
+
+  const inQty = rows.filter((m) => m.quantity > 0).reduce((s, m) => s + m.quantity, 0)
+  const outQty = rows.filter((m) => m.quantity < 0).reduce((s, m) => s - m.quantity, 0)
+
+  function exportCsv() {
+    downloadCsv('mouvements-stock.csv', [
+      ['Date', 'Type', 'Article', 'Lot', 'N° série', 'Quantité', 'Stock après', 'Pièce / motif'],
+      ...rows.map((m) => [m.date, KIND_LABELS[m.kind], m.productName, m.lot, m.serial, String(m.quantity), m.stockAfter === undefined ? '' : String(m.stockAfter), m.reference]),
+    ])
+  }
+
+  return (
+    <div>
+      <div className="doc-stats">
+        <div>
+          <span>Mouvements affichés</span>
+          <strong>{rows.length}</strong>
+        </div>
+        <div>
+          <span>Quantités entrées</span>
+          <strong>+{inQty}</strong>
+        </div>
+        <div>
+          <span>Quantités sorties</span>
+          <strong>−{outQty}</strong>
+        </div>
+      </div>
+
+      <div className="doc-toolbar">
+        <input className="doc-search" placeholder="Rechercher : article, lot, n° de série, pièce…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <select value={productId} onChange={(e) => setProductId(e.target.value)}>
+          <option value="">Tous les articles</option>
+          {products.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+        <select value={kind} onChange={(e) => setKind(e.target.value as MovementKind | '')}>
+          <option value="">Tous les types</option>
+          <option value="in">Entrées</option>
+          <option value="out">Sorties</option>
+          <option value="adjust">Inventaires</option>
+        </select>
+        <label>
+          Du <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </label>
+        <label>
+          au <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </label>
+        <button type="button" onClick={exportCsv}>
+          Exporter (CSV)
+        </button>
+      </div>
+
+      {rows.length === 0 ? (
+        <p className="doc-empty">
+          Aucun mouvement. Les réceptions, les BL, les factures sans BL, les retours de dépôt et les inventaires
+          validés s'enregistrent ici automatiquement.
+        </p>
+      ) : (
+        <div className="doc-table-wrap">
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Article</th>
+                <th>Lot / N° série</th>
+                <th className="num">Quantité</th>
+                <th className="num">Stock après</th>
+                <th>Pièce / motif</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => (
+                <tr key={m.id}>
+                  <td>{frDate(m.date)}</td>
+                  <td>
+                    <span className={`doc-badge ${m.kind === 'in' ? 'doc-exp-ok' : m.kind === 'out' ? 'doc-badge-validated' : 'doc-badge-depot'}`}>
+                      {KIND_LABELS[m.kind]}
+                    </span>
+                  </td>
+                  <td>{m.productName}</td>
+                  <td>{[m.lot, m.serial].filter(Boolean).join(' / ')}</td>
+                  <td className={`num ${m.quantity > 0 ? 'doc-credit' : ''}`}>
+                    <strong>{m.quantity > 0 ? `+${m.quantity}` : m.quantity}</strong>
+                  </td>
+                  <td className="num">{m.stockAfter ?? ''}</td>
+                  <td>{m.reference}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/documents/StockMovesPage.tsx"
 
 cat > src/documents/VatPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
@@ -3749,6 +4685,43 @@ cat > src/documents/documents.css <<'FIN_DU_FICHIER'
 }
 .stock-alert-banner span { flex: 1; }
 .stock-alert-banner .stock-alert-close { padding: 2px 7px !important; }
+
+/* ---------- Statistiques ---------- */
+.stats-title { display: flex; justify-content: space-between; align-items: center; }
+.stats-title button { padding: 2px 8px !important; font-size: 12px !important; }
+.stats-chart { position: relative; }
+.stats-chart svg { display: block; width: 100%; height: auto; }
+.stats-grid, .stats-axis { stroke: #e3e8ee; stroke-width: 1; }
+.stats-axis { stroke: #b5c1ce; }
+.stats-tick { font-size: 11px; fill: var(--pp-muted); font-variant-numeric: tabular-nums; }
+.stats-label { font-size: 11px; font-weight: 600; fill: var(--pp-text); }
+.stats-bar { cursor: default; outline: none; }
+.stats-bar-fill { fill: #2a78d6; transition: fill 0.15s; }
+.stats-bar-active .stats-bar-fill { fill: #4b8fe0; }
+.stats-bar:focus-visible .stats-bar-fill { stroke: var(--pp-text); stroke-width: 1.5; }
+.stats-tooltip {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 9px;
+  background: #fff;
+  border: 1px solid var(--pp-border);
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.15);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.stats-tooltip strong { font-size: 13px; color: var(--pp-text); }
+.stats-tooltip span { color: var(--pp-muted); }
+.stats-columns { display: grid; grid-template-columns: 3fr 2fr; gap: 12px; align-items: start; }
+.stats-bar-cell { width: 25%; }
+.stats-inline-bar { height: 10px; background: #2a78d6; border-radius: 0 4px 4px 0; min-width: 2px; }
+.doc-stats small { font-size: 11.5px; }
+.doc-cash-input { font-size: 16px !important; font-weight: 700; width: 100%; }
 FIN_DU_FICHIER
 echo "OK src/documents/documents.css"
 
@@ -3895,7 +4868,7 @@ cat > src/documents/stockMoves.ts <<'FIN_DU_FICHIER'
 // Mouvements de stock déclenchés par les BL, les réceptions et les retours de dépôt
 import type { Product } from '../types'
 import { newId, today } from './numbering'
-import type { DocLine, StockLot } from './types'
+import type { DocLine, StockLot, StockMovement } from './types'
 
 export interface StockState {
   products: Product[]
@@ -3905,16 +4878,25 @@ export interface StockState {
 export interface MoveResult extends StockState {
   /** Articles dont le stock était insuffisant (ramené à 0) */
   shortages: string[]
+  /** Lignes du journal des mouvements */
+  movements: StockMovement[]
 }
 
 /**
  * direction = -1 : sortie (BL validé, réception annulée)
  * direction = +1 : entrée (réception validée, BL annulé, retour de dépôt)
  */
-export function applyMove(state: StockState, lines: DocLine[], direction: 1 | -1, supplier = ''): MoveResult {
+export function applyMove(
+  state: StockState,
+  lines: DocLine[],
+  direction: 1 | -1,
+  supplier = '',
+  reference = '',
+): MoveResult {
   const products = new Map(state.products.map((p) => [p.id, { ...p }]))
   const lots = state.lots.map((l) => ({ ...l }))
   const shortages: string[] = []
+  const movements: StockMovement[] = []
 
   for (const line of lines) {
     if (!line.productId || line.quantity <= 0) continue
@@ -3957,9 +4939,22 @@ export function applyMove(state: StockState, lines: DocLine[], direction: 1 | -1
       lot.quantity = Math.max(0, lot.quantity + q)
       if (direction > 0 && line.expiry && !lot.expiry) lot.expiry = line.expiry
     }
+
+    movements.push({
+      id: newId(),
+      date: today(),
+      productId: line.productId,
+      productName: product?.name ?? line.description,
+      lot: line.lot ?? '',
+      serial: line.serial ?? '',
+      quantity: q,
+      kind: direction > 0 ? 'in' : 'out',
+      reference,
+      stockAfter: product?.stock,
+    })
   }
 
-  return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages }
+  return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages, movements }
 }
 
 export type ExpiryState = 'expired' | 'soon' | 'ok' | 'none'
@@ -3985,13 +4980,23 @@ echo "OK src/documents/stockMoves.ts"
 
 cat > src/documents/storage.ts <<'FIN_DU_FICHIER'
 import { useEffect, useState } from 'react'
-import { emptyCompany, type CommercialDocument, type CompanyInfo, type Kit, type PartyRecord, type StockLot } from './types'
+import {
+  emptyCompany,
+  type CommercialDocument,
+  type CompanyInfo,
+  type Kit,
+  type PartyRecord,
+  type StockLot,
+  type StockMovement,
+} from './types'
 
 export const DOCS_KEY = 'profitpilot:documents:v1'
 export const COMPANY_KEY = 'profitpilot:company:v1'
 export const LOTS_KEY = 'profitpilot:lots:v1'
 export const KITS_KEY = 'profitpilot:kits:v1'
 export const PARTIES_KEY = 'profitpilot:parties:v1'
+export const MOVES_KEY = 'profitpilot:movements:v1'
+export const CASH_KEY = 'profitpilot:cash:v1'
 export const LAST_BACKUP_KEY = 'profitpilot:last-backup'
 
 /** État React sauvegardé dans le localStorage, avec validation à la relecture */
@@ -4057,6 +5062,14 @@ export const useDocuments = () => usePersistentState<CommercialDocument[]>(DOCS_
 export const useCompany = () => usePersistentState<CompanyInfo>(COMPANY_KEY, emptyCompany, isCompany)
 export const useLots = () => usePersistentState<StockLot[]>(LOTS_KEY, () => [], isLotList)
 export const useKits = () => usePersistentState<Kit[]>(KITS_KEY, () => [], isKitList)
+const isMoveList = listOf<StockMovement>(
+  (x) => isObj(x) && typeof x.id === 'string' && typeof x.productId === 'string' && typeof x.quantity === 'number',
+)
+const isNumber = (x: unknown): x is number => typeof x === 'number' && Number.isFinite(x)
+
+export const useMovements = () => usePersistentState<StockMovement[]>(MOVES_KEY, () => [], isMoveList)
+/** Trésorerie disponible saisie dans l'échéancier */
+export const useCashBalance = () => usePersistentState<number>(CASH_KEY, () => 0, isNumber)
 export const useParties = () => usePersistentState<PartyRecord[]>(PARTIES_KEY, () => [], isPartyList)
 
 // ---------- Sauvegarde complète ----------
@@ -4387,6 +5400,24 @@ export interface StockLot {
   supplier: string
 }
 
+/** Mouvement de stock (journal) : quantité signée, + entrée / − sortie */
+export type MovementKind = 'in' | 'out' | 'adjust'
+
+export interface StockMovement {
+  id: string
+  date: string
+  productId: string
+  productName: string
+  lot: string
+  serial: string
+  quantity: number
+  kind: MovementKind
+  /** Pièce ou motif : « BL-2026-0003 », « Inventaire du 14/10/2026 »… */
+  reference: string
+  /** Stock de l'article après le mouvement */
+  stockAfter?: number
+}
+
 export interface Kit {
   id: string
   name: string
@@ -4701,6 +5732,8 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
     title: 'Pilotage',
     items: [
       { id: 'dashboard', label: 'Tableau de bord' },
+      { id: 'stats', label: 'Statistiques ventes' },
+      { id: 'schedule', label: 'Échéancier & trésorerie' },
       { id: 'products', label: 'Rentabilité produits' },
       { id: 'breakeven', label: 'Résultat & seuil' },
       { id: 'recommendations', label: 'Recommandations' },
@@ -4712,6 +5745,8 @@ const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
       { id: 'catalog', label: 'Mes produits' },
       { id: 'stock', label: 'Stock' },
       { id: 'alerts', label: 'Alertes stock' },
+      { id: 'movements', label: 'Mouvements de stock' },
+      { id: 'inventory', label: 'Inventaire' },
       { id: 'lots', label: 'Lots & traçabilité' },
       { id: 'kits', label: 'Kits' },
       { id: 'import', label: 'Import CSV' },
@@ -5088,11 +6123,15 @@ import KitsPage from './documents/KitsPage'
 import PartiesPage from './documents/PartiesPage'
 import BackupPage from './documents/BackupPage'
 import StockAlertsPage from './documents/StockAlertsPage'
+import StockMovesPage from './documents/StockMovesPage'
+import InventoryPage from './documents/InventoryPage'
+import SchedulePage from './documents/SchedulePage'
+import StatsPage from './documents/StatsPage'
 import { getStockStatus } from './utils/stock'
 import { isOverdue } from './documents/ledger'
 import { applyMove, expiryState } from './documents/stockMoves'
-import { useCompany, useDocuments, useKits, useLots, useParties } from './documents/storage'
-import type { DocKind, DocLine } from './documents/types'
+import { useCashBalance, useCompany, useDocuments, useKits, useLots, useMovements, useParties } from './documents/storage'
+import type { DocKind, DocLine, StockMovement } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
 import './theme.css'
 import './documents/documents.css'
@@ -5107,6 +6146,10 @@ const titles: Record<PageId, string> = {
   catalog: 'Mes produits',
   stock: 'Gestion du stock',
   alerts: 'Alertes de stock',
+  movements: 'Mouvements de stock',
+  inventory: 'Inventaire physique',
+  stats: 'Statistiques des ventes',
+  schedule: 'Échéancier et trésorerie prévisionnelle',
   products: 'Rentabilité par produit',
   breakeven: 'Résultat & seuil de rentabilité',
   import: 'Import de fichiers CSV',
@@ -5163,6 +6206,10 @@ const commercialPages = new Set<PageId>([
   'lots',
   'kits',
   'alerts',
+  'movements',
+  'inventory',
+  'stats',
+  'schedule',
   'vat',
   'company',
   'backup',
@@ -5242,6 +6289,8 @@ export default function App() {
   const [lots, setLots] = useLots()
   const [kits, setKits] = useKits()
   const [parties, setParties] = useParties()
+  const [movements, setMovements] = useMovements()
+  const [cash, setCash] = useCashBalance()
   // Bandeau d'alerte de stock masquable jusqu'au prochain chargement
   const [alertBannerHidden, setAlertBannerHidden] = useState(false)
 
@@ -5287,11 +6336,16 @@ export default function App() {
   }
 
   // BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
-  function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string) {
-    const result = applyMove({ products, lots }, lines, direction, supplier)
+  function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) {
+    const result = applyMove({ products, lots }, lines, direction, supplier, reference)
     handleEdit(result.products)
     setLots(result.lots)
+    addMovements(result.movements)
     if (result.shortages.length) alert('Stock insuffisant, ramené à 0 pour :\n' + result.shortages.join('\n'))
+  }
+
+  function addMovements(added: StockMovement[]) {
+    if (added.length) setMovements((m) => [...m, ...added])
   }
 
   function handleImport(imported: Product[]) {
@@ -5449,6 +6503,14 @@ export default function App() {
             onOpenStock={() => navigate('stock')}
           />
         )}
+        {page === 'movements' && <StockMovesPage movements={movements} products={products} />}
+        {page === 'inventory' && (
+          <InventoryPage products={products} onProductsChange={handleEdit} onMovements={addMovements} />
+        )}
+        {page === 'stats' && <StatsPage documents={documents} products={products} />}
+        {page === 'schedule' && (
+          <SchedulePage documents={documents} cash={cash} onCashChange={setCash} onNavigate={openDocument} />
+        )}
         {page === 'kits' && <KitsPage kits={kits} onChange={setKits} products={products} />}
         {page === 'vat' && <VatPage documents={documents} />}
         {page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
@@ -5461,7 +6523,7 @@ FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
 # Nouvelles pages dans le type PageId
-for id in alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
+for id in stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
   grep -q "'$id'" src/types.ts || sed -i.tmp "s/'decision'/'decision' | '$id'/" src/types.ts
 done
 rm -f src/types.ts.tmp
