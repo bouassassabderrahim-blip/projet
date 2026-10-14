@@ -39,14 +39,23 @@ Chaque ordinateur (ou chaque employé) se connecte avec un e-mail et un mot de p
 
 Le « dossier » est le nom de votre société dans la base, en minuscules, par exemple `orthomed`.
 
-1. Menu **SQL Editor** › **New query**, collez (en remplaçant les e-mails) puis **Run** :
+1. Menu **SQL Editor** › **New query**, collez puis **Run**. Cette ligne autorise d'un coup **tous les comptes
+   créés à l'étape 3**, sans rien taper (relancez-la après avoir créé un nouveau compte) :
 
 ```sql
-insert into public.members (dossier, email) values
-  ('orthomed', 'admin@votre-societe.ma'),
-  ('orthomed', 'magasin@votre-societe.ma')
+insert into public.members (dossier, email)
+select 'orthomed', email from auth.users where email is not null
 on conflict do nothing;
 ```
+
+Pour n'autoriser qu'un compte précis (en remplaçant l'e-mail) :
+
+```sql
+insert into public.members (dossier, email) values ('orthomed', 'admin@votre-societe.ma') on conflict do nothing;
+```
+
+Vérification : `select * from public.members;` doit lister vos e-mails. Si ProfitPilot affiche « n'est pas encore
+autorisé sur le dossier », il donne la ligne exacte à copier, avec un bouton **Copier**.
 
 Pour retirer l'accès à quelqu'un plus tard :
 

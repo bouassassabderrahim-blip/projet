@@ -22,6 +22,7 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 
 
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { useAccess } from '../access/context'
@@ -7944,6 +7945,9 @@ export default function SyncPage() {
   const [error, setError] = useState('')
   /** Adresse injoignable : lien pour la tester directement dans le navigateur */
   const [testUrl, setTestUrl] = useState('')
+  /** Compte pas encore autorisé : ligne SQL exacte à exécuter dans Supabase */
+  const [memberSql, setMemberSql] = useState('')
+  const [sqlCopied, setSqlCopied] = useState(false)
   const [copied, setCopied] = useState(false)
   const joined = config?.joined === true
 
@@ -7956,6 +7960,8 @@ export default function SyncPage() {
   async function connect() {
     setError('')
     setTestUrl('')
+    setMemberSql('')
+    setSqlCopied(false)
     const url = normalizeUrl(form.url)
     const dossier = form.dossier.trim().toLowerCase()
     // L'adresse nettoyée est affichée telle qu'elle sera utilisée
@@ -7969,10 +7975,12 @@ export default function SyncPage() {
     try {
       const remote = new SupabaseRemote(url, form.anonKey.trim(), dossier)
       const session = await remote.signIn(form.email.trim(), form.password)
-      if (!(await remote.isMember()))
-        throw new Error(
-          `Le compte ${session.email} n’est pas membre du dossier « ${dossier} ». Ajoutez-le dans la table « members » (voir le guide).`,
-        )
+      if (!(await remote.isMember())) {
+        // E-mail tel que Supabase le connaît : aucune faute de frappe possible dans la ligne à copier
+        const quote = (v: string) => `'${v.replace(/'/g, "''")}'`
+        setMemberSql(`insert into public.members (dossier, email) values (${quote(dossier)}, ${quote(session.email)}) on conflict do nothing;`)
+        throw new Error(`Le compte ${session.email} n’est pas encore autorisé sur le dossier « ${dossier} ». Autorisez-le avec la ligne ci-dessous.`)
+      }
       const next: SyncConfig = { url, anonKey: form.anonKey.trim(), dossier, email: session.email, refreshToken: session.refreshToken, joined: false }
       saveConfig(next)
       setConfig(next)
@@ -8231,6 +8239,26 @@ export default function SyncPage() {
       )}
 
       {error && <p className="doc-error">{error}</p>}
+      {memberSql && (
+        <div className="doc-info">
+          <p>
+            Dans Supabase › <strong>SQL Editor</strong> › <strong>New query</strong>, collez cette ligne puis cliquez{' '}
+            <strong>Run</strong>. Revenez ensuite ici et cliquez de nouveau <strong>Se connecter</strong>.
+          </p>
+          <div className="sync-invite">
+            <code>{memberSql}</code>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard?.writeText(memberSql)
+                setSqlCopied(true)
+              }}
+            >
+              {sqlCopied ? 'Copié ✓' : 'Copier'}
+            </button>
+          </div>
+        </div>
+      )}
       {testUrl && (
         <p className="doc-info">
           <a href={testUrl} target="_blank" rel="noreferrer">
@@ -11143,14 +11171,23 @@ Chaque ordinateur (ou chaque employé) se connecte avec un e-mail et un mot de p
 
 Le « dossier » est le nom de votre société dans la base, en minuscules, par exemple `orthomed`.
 
-1. Menu **SQL Editor** › **New query**, collez (en remplaçant les e-mails) puis **Run** :
+1. Menu **SQL Editor** › **New query**, collez puis **Run**. Cette ligne autorise d'un coup **tous les comptes
+   créés à l'étape 3**, sans rien taper (relancez-la après avoir créé un nouveau compte) :
 
 ```sql
-insert into public.members (dossier, email) values
-  ('orthomed', 'admin@votre-societe.ma'),
-  ('orthomed', 'magasin@votre-societe.ma')
+insert into public.members (dossier, email)
+select 'orthomed', email from auth.users where email is not null
 on conflict do nothing;
 ```
+
+Pour n'autoriser qu'un compte précis (en remplaçant l'e-mail) :
+
+```sql
+insert into public.members (dossier, email) values ('orthomed', 'admin@votre-societe.ma') on conflict do nothing;
+```
+
+Vérification : `select * from public.members;` doit lister vos e-mails. Si ProfitPilot affiche « n'est pas encore
+autorisé sur le dossier », il donne la ligne exacte à copier, avec un bouton **Copier**.
 
 Pour retirer l'accès à quelqu'un plus tard :
 
