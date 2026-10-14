@@ -20,6 +20,8 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 
 
+
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { useAccess } from '../access/context'
@@ -7891,7 +7893,7 @@ import { useAccess } from '../access/context'
 import { downloadFile } from '../documents/csv'
 import { createBackup } from '../documents/storage'
 import { today } from '../documents/numbering'
-import { decodeInvite, encodeInvite, isValidDossier, loadConfig, normalizeUrl, saveConfig, type SyncConfig } from './config'
+import { decodeInvite, encodeInvite, isValidDossier, loadConfig, normalizeUrl, refHint, saveConfig, urlProblem, type SyncConfig } from './config'
 import { AuthError, OfflineError, SupabaseRemote } from './remote'
 import { createEngine, currentEngine, stopEngine, useSyncStatus } from './runtime'
 import { clearState } from './state'
@@ -7916,7 +7918,8 @@ function localDataCount(): number {
 }
 
 function explain(e: unknown): string {
-  if (e instanceof OfflineError) return 'Serveur injoignable : vérifiez l’adresse du projet et la connexion Internet.'
+  if (e instanceof OfflineError)
+    return 'Serveur injoignable. Causes possibles : une faute dans l’adresse du projet (copiez-la depuis Supabase plutôt que de la taper), un bloqueur de publicité qui bloque supabase.co, ou pas de connexion Internet. Utilisez le lien « Tester cette adresse » ci-dessous.'
   if (e instanceof AuthError) return `Connexion refusée : ${e.message}. Vérifiez l’e-mail, le mot de passe et la clé publique.`
   const msg = e instanceof Error ? e.message : String(e)
   if (/relation .* does not exist|Could not find the table|schema cache/i.test(msg))
@@ -7939,6 +7942,8 @@ export default function SyncPage() {
     password: '',
   })
   const [error, setError] = useState('')
+  /** Adresse injoignable : lien pour la tester directement dans le navigateur */
+  const [testUrl, setTestUrl] = useState('')
   const [copied, setCopied] = useState(false)
   const joined = config?.joined === true
 
@@ -7950,9 +7955,13 @@ export default function SyncPage() {
 
   async function connect() {
     setError('')
+    setTestUrl('')
     const url = normalizeUrl(form.url)
     const dossier = form.dossier.trim().toLowerCase()
-    if (!/^https?:\/\/.+/.test(url)) return setError('Adresse du projet invalide (ex. https://abcd.supabase.co).')
+    // L'adresse nettoyée est affichée telle qu'elle sera utilisée
+    if (url !== form.url) setForm((f) => ({ ...f, url }))
+    const problem = urlProblem(url)
+    if (problem) return setError(problem)
     if (!form.anonKey.trim()) return setError('Indiquez la clé publique du projet.')
     if (!isValidDossier(dossier)) return setError('Nom de dossier : lettres minuscules, chiffres et tirets (ex. orthomed).')
     if (!form.email.trim() || !form.password) return setError('Indiquez l’e-mail et le mot de passe de ce poste.')
@@ -7970,7 +7979,9 @@ export default function SyncPage() {
       setStep({ kind: 'choose', config: next, remoteCount: await remote.count(), localCount: localDataCount() })
     } catch (e) {
       setStep({ kind: 'form' })
-      setError(explain(e))
+      const hint = e instanceof OfflineError ? refHint(url) : null
+      setError(hint ? `Serveur injoignable. ${hint} Copiez l’adresse depuis Supabase plutôt que de la taper.` : explain(e))
+      if (e instanceof OfflineError) setTestUrl(`${url}/auth/v1/health`)
     }
   }
 
@@ -8155,7 +8166,7 @@ export default function SyncPage() {
           <div className="doc-grid">
             <label>
               Adresse du projet Supabase
-              <input value={form.url} placeholder="https://abcd.supabase.co" onChange={(e) => setForm({ ...form, url: e.target.value })} />
+              <input value={form.url} placeholder="https://abcdefghijklmnopqrst.supabase.co" onChange={(e) => setForm({ ...form, url: e.target.value })} />
             </label>
             <label>
               Clé publique (anon / publishable)
@@ -8220,6 +8231,16 @@ export default function SyncPage() {
       )}
 
       {error && <p className="doc-error">{error}</p>}
+      {testUrl && (
+        <p className="doc-info">
+          <a href={testUrl} target="_blank" rel="noreferrer">
+            Tester cette adresse dans un nouvel onglet
+          </a>{' '}
+          : si une page de texte s’affiche (même un message en anglais comme « No API key found »), l’adresse est bonne et
+          c’est un bloqueur de publicité qui gêne ProfitPilot ; si le navigateur affiche « Ce site est inaccessible », l’adresse
+          est fausse.
+        </p>
+      )}
 
       <fieldset className="doc-panel">
         <legend>À savoir</legend>
@@ -8424,8 +8445,35 @@ export function saveConfig(config: SyncConfig | null) {
 }
 
 /** Adresse nettoyée : https, sans barre finale */
-export function normalizeUrl(url: string): string {
-  return url.trim().replace(/\/+$/, '')
+/**
+ * Adresse du projet nettoyée. Accepte aussi ce qu'on copie souvent par erreur : l'adresse de la page
+ * Supabase (supabase.com/dashboard/project/<identifiant>/…), l'identifiant seul (20 lettres),
+ * l'adresse sans https:// ou suivie de /rest/v1 ou /auth/v1.
+ */
+export function normalizeUrl(input: string): string {
+  const raw = input.trim().replace(/\s+/g, '')
+  const page = raw.match(/supabase\.com\/dashboard\/project\/([a-z0-9]{10,40})/i)
+  if (page) return `https://${page[1].toLowerCase()}.supabase.co`
+  if (/^[a-z]{20}$/.test(raw)) return `https://${raw}.supabase.co`
+  const url = raw.replace(/\/(rest|auth)\/v1(\/.*)?$/i, '').replace(/\/+$/, '')
+  return /^[a-z0-9-]+\.supabase\.co$/i.test(url) ? `https://${url}` : url
+}
+
+/** Identifiant d'un projet Supabase (20 lettres) dont la longueur est suspecte : conseil, ou null */
+export function refHint(url: string): string | null {
+  const ref = url.match(/^https?:\/\/([a-z0-9]+)\.supabase\.co$/i)?.[1]
+  if (!ref || ref.length === 20) return null
+  return `L’identifiant du projet (« ${ref} ») compte ${ref.length} caractères alors qu’il en fait normalement 20 : une lettre manque ou est en trop.`
+}
+
+/** Erreur évidente dans une adresse déjà nettoyée (message en clair), ou null */
+export function urlProblem(url: string): string | null {
+  if (!/^https?:\/\/[^/\s]+$/i.test(url)) return 'Adresse du projet invalide : elle doit ressembler à https://abcdefghijklmnopqrst.supabase.co'
+  const host = url.replace(/^https?:\/\//i, '').toLowerCase()
+  if (host.endsWith('.supabase.com')) return 'L’adresse du projet se termine par « .supabase.co » (sans « m » à la fin).'
+  if (/^(www\.|app\.)?supabase\.(com|co)$/.test(host))
+    return 'Ceci est l’adresse du site Supabase, pas celle de votre projet : elle doit ressembler à https://abcdefghijklmnopqrst.supabase.co'
+  return null
 }
 
 /** Code de connexion à transmettre aux autres postes (adresse, clé publique, dossier ; jamais de mot de passe) */
@@ -11113,7 +11161,9 @@ delete from public.members where dossier = 'orthomed' and email = 'ancien@votre-
 ## Étape 5 — Récupérer l'adresse et la clé publique
 
 Menu **Project Settings** › **API** (ou *Data API* / *API Keys*) :
-- **Project URL** : `https://xxxxxxxx.supabase.co`
+- **Project URL** : `https://xxxxxxxxxxxxxxxxxxxx.supabase.co` (20 lettres avant `.supabase.co`).
+  Le plus sûr : **copiez** l'adresse de la page Supabase affichée en haut du navigateur
+  (`supabase.com/dashboard/project/…`) et collez-la telle quelle dans ProfitPilot, qui en déduit l'adresse du projet.
 - **Clé publique** : la clé `anon` *public* (ou *publishable*). **Jamais** la clé `service_role` / *secret*.
 
 ## Étape 6 — Premier ordinateur (celui qui a déjà vos données)

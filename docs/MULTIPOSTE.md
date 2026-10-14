@@ -57,7 +57,9 @@ delete from public.members where dossier = 'orthomed' and email = 'ancien@votre-
 ## Étape 5 — Récupérer l'adresse et la clé publique
 
 Menu **Project Settings** › **API** (ou *Data API* / *API Keys*) :
-- **Project URL** : `https://xxxxxxxx.supabase.co`
+- **Project URL** : `https://xxxxxxxxxxxxxxxxxxxx.supabase.co` (20 lettres avant `.supabase.co`).
+  Le plus sûr : **copiez** l'adresse de la page Supabase affichée en haut du navigateur
+  (`supabase.com/dashboard/project/…`) et collez-la telle quelle dans ProfitPilot, qui en déduit l'adresse du projet.
 - **Clé publique** : la clé `anon` *public* (ou *publishable*). **Jamais** la clé `service_role` / *secret*.
 
 ## Étape 6 — Premier ordinateur (celui qui a déjà vos données)

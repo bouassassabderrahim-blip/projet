@@ -45,8 +45,35 @@ export function saveConfig(config: SyncConfig | null) {
 }
 
 /** Adresse nettoyée : https, sans barre finale */
-export function normalizeUrl(url: string): string {
-	return url.trim().replace(/\/+$/, '')
+/**
+ * Adresse du projet nettoyée. Accepte aussi ce qu'on copie souvent par erreur : l'adresse de la page
+ * Supabase (supabase.com/dashboard/project/<identifiant>/…), l'identifiant seul (20 lettres),
+ * l'adresse sans https:// ou suivie de /rest/v1 ou /auth/v1.
+ */
+export function normalizeUrl(input: string): string {
+	const raw = input.trim().replace(/\s+/g, '')
+	const page = raw.match(/supabase\.com\/dashboard\/project\/([a-z0-9]{10,40})/i)
+	if (page) return `https://${page[1].toLowerCase()}.supabase.co`
+	if (/^[a-z]{20}$/.test(raw)) return `https://${raw}.supabase.co`
+	const url = raw.replace(/\/(rest|auth)\/v1(\/.*)?$/i, '').replace(/\/+$/, '')
+	return /^[a-z0-9-]+\.supabase\.co$/i.test(url) ? `https://${url}` : url
+}
+
+/** Identifiant d'un projet Supabase (20 lettres) dont la longueur est suspecte : conseil, ou null */
+export function refHint(url: string): string | null {
+	const ref = url.match(/^https?:\/\/([a-z0-9]+)\.supabase\.co$/i)?.[1]
+	if (!ref || ref.length === 20) return null
+	return `L’identifiant du projet (« ${ref} ») compte ${ref.length} caractères alors qu’il en fait normalement 20 : une lettre manque ou est en trop.`
+}
+
+/** Erreur évidente dans une adresse déjà nettoyée (message en clair), ou null */
+export function urlProblem(url: string): string | null {
+	if (!/^https?:\/\/[^/\s]+$/i.test(url)) return 'Adresse du projet invalide : elle doit ressembler à https://abcdefghijklmnopqrst.supabase.co'
+	const host = url.replace(/^https?:\/\//i, '').toLowerCase()
+	if (host.endsWith('.supabase.com')) return 'L’adresse du projet se termine par « .supabase.co » (sans « m » à la fin).'
+	if (/^(www\.|app\.)?supabase\.(com|co)$/.test(host))
+		return 'Ceci est l’adresse du site Supabase, pas celle de votre projet : elle doit ressembler à https://abcdefghijklmnopqrst.supabase.co'
+	return null
 }
 
 /** Code de connexion à transmettre aux autres postes (adresse, clé publique, dossier ; jamais de mot de passe) */
