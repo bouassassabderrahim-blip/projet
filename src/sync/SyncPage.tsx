@@ -261,7 +261,7 @@ export default function SyncPage() {
 				<fieldset className="doc-panel">
 					<legend>Connecter cet ordinateur</legend>
 					<label className="doc-notes">
-						Code de connexion (si un autre poste est déjà configuré)
+						Code de connexion : laissez vide sur le premier ordinateur (à coller seulement sur les postes suivants)
 						<input value={form.invite} placeholder="PP1-…" onChange={(e) => applyInvite(e.target.value)} />
 					</label>
 					<div className="doc-grid">
