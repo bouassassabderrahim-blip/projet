@@ -3,8 +3,9 @@
 # À lancer à la racine du projet (dossier contenant src/)
 set -e
 [ -f src/types.ts ] || { echo "Erreur : lancez ce script dans le dossier du projet (src/types.ts introuvable)"; exit 1; }
-mkdir -p src/documents src/components
+mkdir -p src/documents src/components src/shell
 for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src/types.ts; do [ -f "$f" ] && cp "$f" "$f.bak"; done; true
+
 
 
 
@@ -1283,7 +1284,7 @@ import PaymentDialog from './PaymentDialog'
 import ReminderPrint from './ReminderPrint'
 import { downloadCsv, journal } from './csv'
 import { balanceOf, isActive, isOverdue, paidAmount, sign } from './ledger'
-import { addDays, emptyLine, frDate, newId, nextNumber, today } from './numbering'
+import { addDays, frDate, newDocument, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
   DOC_LABELS,
@@ -1361,6 +1362,8 @@ export default function DocumentsPage({
   onStockMove,
 }: Props) {
   const [view, setView] = useState<View>(() => {
+    // « new » : création directe depuis le bouton Créer ou l'accueil
+    if (openId === 'new') return { mode: 'edit', doc: newDocument(kind, documents) }
     const doc = openId ? documents.find((d) => d.id === openId) : undefined
     if (!doc) return { mode: 'list' }
     // Une pièce validée s'ouvre en consultation, un brouillon en modification
@@ -1421,19 +1424,7 @@ export default function DocumentsPage({
   }, [documents, kind, now])
 
   function createDoc(): CommercialDocument {
-    return {
-      id: newId(),
-      kind,
-      number: nextNumber(kind, documents, now),
-      date: now,
-      // Facture : délai légal de paiement par défaut de 60 jours ; devis : validité de 30 jours
-      dueDate: addDays(now, kind === 'quote' ? 30 : 60),
-      party: emptyParty(),
-      lines: [emptyLine()],
-      status: 'draft',
-      paymentMethod: 'virement',
-      notes: '',
-    }
+    return newDocument(kind, documents)
   }
 
   /** Ajoute le tiers au fichier clients / fournisseurs s'il n'y est pas encore */
@@ -2113,6 +2104,8 @@ interface Props {
   onChange: (lots: StockLot[]) => void
   products: Product[]
   documents: CommercialDocument[]
+  /** Recherche initiale (lot ou n° de série venant de la recherche globale) */
+  initialQuery?: string
 }
 
 const EXPIRY_LABELS: Record<ExpiryState, string> = {
@@ -2125,9 +2118,9 @@ const EXPIRY_LABELS: Record<ExpiryState, string> = {
 type Filter = '' | 'available' | 'expired' | 'soon'
 
 /** Stock par lot / numéro de série, péremptions et traçabilité (rappel de lot) */
-export default function LotsPage({ lots, onChange, products, documents }: Props) {
-  const [query, setQuery] = useState('')
-  const [filter, setFilter] = useState<Filter>('available')
+export default function LotsPage({ lots, onChange, products, documents, initialQuery = '' }: Props) {
+  const [query, setQuery] = useState(initialQuery)
+  const [filter, setFilter] = useState<Filter>(initialQuery ? '' : 'available')
   const [draft, setDraft] = useState({ productId: '', lot: '', serial: '', expiry: '', quantity: '1', supplier: '' })
   const [error, setError] = useState('')
   const now = today()
@@ -2374,6 +2367,8 @@ interface Props {
   onChange: (parties: PartyRecord[]) => void
   documents: CommercialDocument[]
   company: CompanyInfo
+  /** Fiche à ouvrir directement (recherche globale) */
+  openId?: string
 }
 
 const fields: { key: 'name' | 'address' | 'city' | 'ice' | 'ifNumber' | 'rc' | 'phone' | 'email'; label: string }[] = [
@@ -2390,9 +2385,9 @@ const fields: { key: 'name' | 'address' | 'city' | 'ice' | 'ifNumber' | 'rc' | '
 const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
 
 /** Fichier clients ou fournisseurs : fiche, chiffre d'affaires, encours, historique, relance */
-export default function PartiesPage({ role, parties, onChange, documents, company }: Props) {
+export default function PartiesPage({ role, parties, onChange, documents, company, openId }: Props) {
   const [query, setQuery] = useState('')
-  const [editing, setEditing] = useState<PartyRecord | null>(null)
+  const [editing, setEditing] = useState<PartyRecord | null>(() => parties.find((p) => p.id === openId) ?? null)
   const [reminder, setReminder] = useState<string | null>(null)
   const [error, setError] = useState('')
   const now = today()
@@ -4821,6 +4816,24 @@ export function frDate(d: string | undefined): string {
 export function emptyLine(): DocLine {
   return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
+
+/** Nouvelle pièce vierge (brouillon numéroté) */
+export function newDocument(kind: DocKind, docs: CommercialDocument[]): CommercialDocument {
+  const date = today()
+  return {
+    id: newId(),
+    kind,
+    number: nextNumber(kind, docs, date),
+    date,
+    // Facture : délai légal de paiement par défaut de 60 jours ; devis : validité de 30 jours
+    dueDate: addDays(date, kind === 'quote' ? 30 : 60),
+    party: { name: '', address: '', city: '', ice: '', ifNumber: '', rc: '', phone: '', email: '' },
+    lines: [emptyLine()],
+    status: 'draft',
+    paymentMethod: 'virement',
+    notes: '',
+  }
+}
 FIN_DU_FICHIER
 echo "OK src/documents/numbering.ts"
 
@@ -5524,6 +5537,1034 @@ export const emptyIntervention = (): Intervention => ({
 FIN_DU_FICHIER
 echo "OK src/documents/types.ts"
 
+cat > src/shell/GlobalSearch.tsx <<'FIN_DU_FICHIER'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import type { Product } from '../types'
+import { frDate } from '../documents/numbering'
+import { computeTotals, formatMAD } from '../documents/tva'
+import { DOC_LABELS, type CommercialDocument, type PartyRecord, type StockLot } from '../documents/types'
+
+export type SearchHit =
+  | { type: 'doc'; doc: CommercialDocument }
+  | { type: 'party'; party: PartyRecord }
+  | { type: 'product'; product: Product }
+  | { type: 'lot'; lot: StockLot; productName: string }
+
+interface Props {
+  documents: CommercialDocument[]
+  parties: PartyRecord[]
+  products: Product[]
+  lots: StockLot[]
+  onPick: (hit: SearchHit) => void
+  onClose: () => void
+}
+
+const norm = (s: string | undefined) =>
+  (s ?? '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+
+/** Recherche globale (Cmd/Ctrl + K) : pièces, tiers, articles, lots et n° de série */
+export default function GlobalSearch({ documents, parties, products, lots, onPick, onClose }: Props) {
+  const [query, setQuery] = useState('')
+  const [active, setActive] = useState(0)
+  const input = useRef<HTMLInputElement>(null)
+
+  useEffect(() => input.current?.focus(), [])
+
+  const hits = useMemo<SearchHit[]>(() => {
+    const q = norm(query.trim())
+    if (q.length < 2) return []
+    const has = (...values: (string | undefined)[]) => values.some((v) => norm(v).includes(q))
+    const docs = documents
+      .filter((d) =>
+        has(d.number, d.party.name, d.supplierRef, d.intervention?.patient, d.intervention?.patientRef, ...d.lines.flatMap((l) => [l.lot, l.serial])),
+      )
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .slice(0, 8)
+      .map((doc): SearchHit => ({ type: 'doc', doc }))
+    const tiers = parties
+      .filter((p) => has(p.name, p.ice, p.city, p.phone))
+      .slice(0, 5)
+      .map((party): SearchHit => ({ type: 'party', party }))
+    const items = products
+      .filter((p) => has(p.name, p.reference, p.category))
+      .slice(0, 5)
+      .map((product): SearchHit => ({ type: 'product', product }))
+    const lotHits = lots
+      .filter((l) => has(l.lot, l.serial))
+      .slice(0, 5)
+      .map((lot): SearchHit => ({ type: 'lot', lot, productName: products.find((p) => p.id === lot.productId)?.name ?? '' }))
+    return [...docs, ...tiers, ...items, ...lotHits]
+  }, [query, documents, parties, products, lots])
+
+  function onKey(e: KeyboardEvent) {
+    if (e.key === 'Escape') onClose()
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setActive((a) => Math.min(a + 1, hits.length - 1))
+    }
+    if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActive((a) => Math.max(a - 1, 0))
+    }
+    if (e.key === 'Enter' && hits[active]) onPick(hits[active])
+  }
+
+  const describe = (h: SearchHit): [string, string, string] => {
+    if (h.type === 'doc')
+      return [
+        DOC_LABELS[h.doc.kind].title,
+        `${h.doc.number} · ${h.doc.party.name}`,
+        `${frDate(h.doc.date)} · ${formatMAD(computeTotals(h.doc).netToPay)}`,
+      ]
+    if (h.type === 'party') return [h.party.role === 'client' ? 'Client' : 'Fournisseur', h.party.name, [h.party.city, h.party.ice].filter(Boolean).join(' · ')]
+    if (h.type === 'product') return ['Article', h.product.name, [h.product.reference, h.product.stock !== undefined ? `stock ${h.product.stock}` : ''].filter(Boolean).join(' · ')]
+    return ['Lot', [h.lot.lot, h.lot.serial].filter(Boolean).join(' / '), `${h.productName} · ${h.lot.quantity} en stock`]
+  }
+
+  return (
+    <div className="erp-search-backdrop" onClick={onClose}>
+      <div className="erp-search" role="dialog" aria-modal="true" aria-label="Recherche globale" onClick={(e) => e.stopPropagation()}>
+        <input
+          ref={input}
+          value={query}
+          placeholder="Rechercher une pièce, un client, un article, un lot, un n° de série, un patient…"
+          onChange={(e) => {
+            setQuery(e.target.value)
+            setActive(0)
+          }}
+          onKeyDown={onKey}
+        />
+        <div className="erp-search-results">
+          {query.trim().length < 2 ? (
+            <p className="erp-search-hint">Tapez au moins 2 caractères · ↑ ↓ pour choisir · Entrée pour ouvrir · Échap pour fermer</p>
+          ) : hits.length === 0 ? (
+            <p className="erp-search-hint">Aucun résultat.</p>
+          ) : (
+            hits.map((h, i) => {
+              const [kind, title, sub] = describe(h)
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  className={`erp-search-hit ${i === active ? 'erp-search-hit-active' : ''}`}
+                  onMouseEnter={() => setActive(i)}
+                  onClick={() => onPick(h)}
+                >
+                  <span className="erp-search-kind">{kind}</span>
+                  <span className="erp-search-title">{title}</span>
+                  <span className="erp-search-sub">{sub}</span>
+                </button>
+              )
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/GlobalSearch.tsx"
+
+cat > src/shell/Launchpad.tsx <<'FIN_DU_FICHIER'
+import { useMemo } from 'react'
+import type { PageId, Product } from '../types'
+import { getStockStatus } from '../utils/stock'
+import { balanceOf, isActive, isOverdue, sign } from '../documents/ledger'
+import { frDate, today } from '../documents/numbering'
+import { expiryState } from '../documents/stockMoves'
+import { computeTotals, formatMAD, round2 } from '../documents/tva'
+import { DOC_LABELS, STATUS_LABELS, type CommercialDocument, type DocKind, type StockLot } from '../documents/types'
+import Icon from './icons'
+import type { ModuleId } from './navigation'
+
+interface Props {
+  companyName: string
+  documents: CommercialDocument[]
+  products: Product[]
+  lots: StockLot[]
+  cash: number
+  onNavigate: (page: PageId) => void
+  onOpenDocument: (kind: DocKind, id?: string) => void
+  onCreate: (kind: DocKind) => void
+}
+
+interface Tile {
+  module: ModuleId
+  title: string
+  value: string
+  sub: string
+  page: PageId
+  tone?: 'danger' | 'warning' | 'good'
+}
+
+const compactMAD = (v: number) =>
+  Math.abs(v) >= 1e6
+    ? `${(v / 1e6).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} M DH`
+    : Math.abs(v) >= 1e4
+      ? `${(v / 1e3).toLocaleString('fr-FR', { maximumFractionDigits: 1 })} k DH`
+      : formatMAD(v)
+
+/** Accueil façon « launchpad » : une tuile par indicateur clé, cliquable vers l'écran concerné */
+export default function Launchpad({ companyName, documents, products, lots, cash, onNavigate, onOpenDocument, onCreate }: Props) {
+  const now = today()
+  const month = now.slice(0, 7)
+
+  const tiles = useMemo<Tile[]>(() => {
+    let monthHT = 0
+    let monthMargin = 0
+    let receivable = 0
+    let late = 0
+    let lateCount = 0
+    let payable = 0
+    let quotesHT = 0
+    let quotes = 0
+    const converted = new Set(documents.map((d) => d.sourceId).filter(Boolean))
+    const received = new Set(documents.filter((d) => d.kind === 'receipt' && d.status !== 'cancelled').map((d) => d.sourceId))
+    let pendingPurchases = 0
+    // TVA du mois, estimée sur les dates de facture (collectée − déductible)
+    let monthVat = 0
+    let depot = 0
+    const cost = new Map(products.map((p) => [p.id, p.unitCost]))
+
+    for (const d of documents) {
+      if (!isActive(d)) continue
+      if ((d.kind === 'invoice' || d.kind === 'credit') && d.date.startsWith(month)) {
+        const t = computeTotals(d)
+        monthHT += sign(d) * t.totalHT
+        for (const l of d.lines) {
+          const c = l.productId ? (cost.get(l.productId) ?? 0) : 0
+          monthMargin += sign(d) * (l.quantity * l.unitPriceHT * (1 - l.discount / 100) - c * l.quantity)
+        }
+      }
+      if (d.date.startsWith(month) && (d.kind === 'invoice' || d.kind === 'credit' || d.kind === 'bill'))
+        monthVat += (d.kind === 'bill' ? -1 : sign(d)) * computeTotals(d).totalTVA
+      if (d.kind === 'invoice') receivable += balanceOf(d, documents)
+      if (d.kind === 'bill') payable += balanceOf(d, documents)
+      if (d.kind === 'invoice' && isOverdue(d, documents, now)) {
+        late += balanceOf(d, documents)
+        lateCount++
+      }
+      if (d.kind === 'quote' && d.status === 'validated' && !converted.has(d.id) && d.dueDate >= now) {
+        quotes++
+        quotesHT += computeTotals(d).totalHT
+      }
+      if (d.kind === 'purchase' && d.status === 'validated' && !received.has(d.id)) pendingPurchases++
+      if (d.kind === 'delivery' && d.consignment && d.status === 'validated') depot += d.lines.filter((l) => l.depot === 'depot').length
+    }
+    const out = products.filter((p) => getStockStatus(p) === 'out').length
+    const low = products.filter((p) => getStockStatus(p) === 'low').length
+    const expiring = lots.filter((l) => l.quantity > 0 && ['expired', 'soon'].includes(expiryState(l.expiry, now))).length
+    const stockValue = products.reduce((s, p) => s + (p.stock ?? 0) * p.unitCost, 0)
+    const forecast = cash + receivable - payable
+
+    return [
+      { module: 'sales', title: 'CA du mois (HT)', value: compactMAD(round2(monthHT)), sub: monthHT ? `marge ${Math.round((monthMargin / monthHT) * 100)} %` : 'aucune facture ce mois', page: 'stats' },
+      { module: 'sales', title: 'Devis en cours', value: String(quotes), sub: compactMAD(round2(quotesHT)) + ' HT à transformer', page: 'quotes' },
+      { module: 'sales', title: 'Factures échues', value: String(lateCount), sub: compactMAD(round2(late)) + ' à relancer', page: 'invoices', tone: lateCount ? 'danger' : 'good' },
+      { module: 'sales', title: 'Implants en dépôt', value: String(depot), sub: 'chez les cliniques', page: 'depots' },
+      { module: 'purchases', title: 'Commandes à recevoir', value: String(pendingPurchases), sub: 'commandes fournisseurs validées', page: 'purchases' },
+      { module: 'purchases', title: 'Fournisseurs à payer', value: compactMAD(round2(payable)), sub: 'factures fournisseurs ouvertes', page: 'bills' },
+      { module: 'stock', title: 'Ruptures / sous le seuil', value: `${out} / ${low}`, sub: 'articles à réapprovisionner', page: 'alerts', tone: out ? 'danger' : low ? 'warning' : 'good' },
+      { module: 'stock', title: 'Péremptions', value: String(expiring), sub: 'lots périmés ou < 90 jours', page: 'lots', tone: expiring ? 'warning' : 'good' },
+      { module: 'stock', title: 'Valeur du stock', value: compactMAD(round2(stockValue)), sub: "au coût d'achat", page: 'inventory' },
+      { module: 'finance', title: 'À encaisser', value: compactMAD(round2(receivable)), sub: 'créances clients', page: 'schedule' },
+      { module: 'finance', title: 'Solde prévisionnel', value: compactMAD(round2(forecast)), sub: 'trésorerie + créances − dettes', page: 'schedule', tone: forecast < 0 ? 'danger' : undefined },
+      { module: 'finance', title: 'TVA du mois (estimation)', value: compactMAD(round2(monthVat)), sub: monthVat < 0 ? 'crédit de TVA' : 'collectée − déductible', page: 'vat' },
+    ]
+  }, [documents, products, lots, cash, month, now])
+
+  const recent = useMemo(
+    () => [...documents].sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number)).slice(0, 8),
+    [documents],
+  )
+
+  const groups: { module: ModuleId; label: string }[] = [
+    { module: 'sales', label: 'Ventes' },
+    { module: 'purchases', label: 'Achats' },
+    { module: 'stock', label: 'Stocks' },
+    { module: 'finance', label: 'Finance' },
+  ]
+  const hour = new Date().getHours()
+
+  return (
+    <div className="erp-home">
+      <div className="erp-home-head">
+        <div>
+          <h2>{hour < 18 ? 'Bonjour' : 'Bonsoir'}</h2>
+          <p>
+            {companyName || 'Votre dossier'} · {new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+          </p>
+        </div>
+        <div className="erp-quick">
+          <button type="button" className="btn-primary" onClick={() => onCreate('quote')}>
+            + Devis
+          </button>
+          <button type="button" onClick={() => onCreate('invoice')}>
+            + Facture
+          </button>
+          <button type="button" onClick={() => onCreate('delivery')}>
+            + BL
+          </button>
+          <button type="button" onClick={() => onCreate('purchase')}>
+            + Commande fournisseur
+          </button>
+        </div>
+      </div>
+
+      {groups.map((g) => (
+        <section key={g.module} className="erp-tile-group">
+          <h3>
+            <Icon name={g.module} /> {g.label}
+          </h3>
+          <div className="erp-tiles">
+            {tiles
+              .filter((t) => t.module === g.module)
+              .map((t) => (
+                <button key={t.title} type="button" className={`erp-tile ${t.tone ? `erp-tile-${t.tone}` : ''}`} onClick={() => onNavigate(t.page)}>
+                  <span className="erp-tile-title">{t.title}</span>
+                  <span className="erp-tile-value">{t.value}</span>
+                  <span className="erp-tile-sub">{t.sub}</span>
+                </button>
+              ))}
+          </div>
+        </section>
+      ))}
+
+      <section className="erp-tile-group">
+        <h3>Dernières pièces</h3>
+        {recent.length === 0 ? (
+          <p className="doc-empty">Aucune pièce pour l'instant : commencez par créer un devis ou une facture.</p>
+        ) : (
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Pièce</th>
+                <th>N°</th>
+                <th>Date</th>
+                <th>Tiers</th>
+                <th className="num">Montant TTC</th>
+                <th>État</th>
+              </tr>
+            </thead>
+            <tbody>
+              {recent.map((d) => (
+                <tr key={d.id}>
+                  <td>{DOC_LABELS[d.kind].title}</td>
+                  <td>
+                    <button type="button" className="doc-link" onClick={() => onOpenDocument(d.kind, d.id)}>
+                      {d.number}
+                    </button>
+                  </td>
+                  <td>{frDate(d.date)}</td>
+                  <td>{d.party.name}</td>
+                  <td className="num">{formatMAD(computeTotals(d).netToPay)}</td>
+                  <td>
+                    <span className={`doc-badge doc-badge-${d.status}`}>{STATUS_LABELS[d.status]}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/Launchpad.tsx"
+
+cat > src/shell/ModuleBar.tsx <<'FIN_DU_FICHIER'
+import Icon from './icons'
+import { MODULES, type ModuleId } from './navigation'
+import type { PageId } from '../types'
+
+interface Props {
+  current: ModuleId
+  onOpen: (page: PageId) => void
+  /** Alertes par module (pastille) */
+  badges: Partial<Record<ModuleId, number>>
+}
+
+/** Ruban des modules : Accueil, Ventes, Achats, Stocks, Finance, Pilotage, Paramètres */
+export default function ModuleBar({ current, onOpen, badges }: Props) {
+  return (
+    <nav className="erp-modules no-print" aria-label="Modules">
+      {MODULES.map((m, i) => (
+        <button
+          key={m.id}
+          type="button"
+          className={`erp-module ${m.id === current ? 'erp-module-active' : ''}`}
+          title={`${m.label} (Alt+${i + 1})`}
+          onClick={() => onOpen(m.groups[0].pages[0])}
+        >
+          <Icon name={m.id} />
+          {m.label}
+          {!!badges[m.id] && <span className="nav-badge">{badges[m.id]}</span>}
+        </button>
+      ))}
+    </nav>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/ModuleBar.tsx"
+
+cat > src/shell/StatusBar.tsx <<'FIN_DU_FICHIER'
+interface Props {
+  companyName: string
+  documentsCount: number
+  productsCount: number
+  lastBackup: string
+}
+
+/** Barre d'état : dossier, exercice, volumes, dernière sauvegarde */
+export default function StatusBar({ companyName, documentsCount, productsCount, lastBackup }: Props) {
+  const year = new Date().getFullYear()
+  return (
+    <footer className="erp-status no-print">
+      <span>Dossier : {companyName || '—'}</span>
+      <span>Exercice {year}</span>
+      <span>{documentsCount} pièce(s)</span>
+      <span>{productsCount} article(s)</span>
+      <span className={lastBackup ? undefined : 'erp-status-warn'}>
+        Sauvegarde : {lastBackup ? new Date(lastBackup + 'T00:00:00').toLocaleDateString('fr-FR') : 'jamais'}
+      </span>
+      <span className="erp-status-right">Données enregistrées sur ce poste · {new Date().toLocaleDateString('fr-FR')}</span>
+    </footer>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/StatusBar.tsx"
+
+cat > src/shell/TopBar.tsx <<'FIN_DU_FICHIER'
+import { useState } from 'react'
+import Icon from './icons'
+import type { PageId } from '../types'
+import type { DocKind } from '../documents/types'
+
+export interface Notification {
+  id: string
+  text: string
+  severity: 'danger' | 'warning' | 'info'
+  page: PageId
+}
+
+interface Props {
+  companyName: string
+  notifications: Notification[]
+  onSearch: () => void
+  onNavigate: (page: PageId) => void
+  onCreate: (kind: DocKind) => void
+}
+
+const CREATE: { kind: DocKind; label: string }[] = [
+  { kind: 'quote', label: 'Devis' },
+  { kind: 'order', label: 'Bon de commande' },
+  { kind: 'delivery', label: 'Bon de livraison' },
+  { kind: 'invoice', label: 'Facture' },
+  { kind: 'credit', label: 'Avoir' },
+  { kind: 'purchase', label: 'Commande fournisseur' },
+  { kind: 'receipt', label: 'Bon de réception' },
+  { kind: 'bill', label: 'Facture fournisseur' },
+]
+
+const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform)
+
+/** Barre supérieure : dossier, recherche globale, création rapide, notifications */
+export default function TopBar({ companyName, notifications, onSearch, onNavigate, onCreate }: Props) {
+  const [menu, setMenu] = useState<'create' | 'notif' | null>(null)
+  const toggle = (m: 'create' | 'notif') => setMenu((cur) => (cur === m ? null : m))
+  const danger = notifications.filter((n) => n.severity === 'danger').length
+
+  return (
+    <header className="erp-topbar no-print">
+      <button type="button" className="erp-brand" onClick={() => onNavigate('home')}>
+        <span className="erp-logo">PP</span>
+        <span>
+          ProfitPilot <small>ERP</small>
+        </span>
+      </button>
+      <span className="erp-dossier" title="Dossier ouvert">
+        {companyName || 'Dossier sans nom'}
+      </span>
+
+      <button type="button" className="erp-search-trigger" onClick={onSearch}>
+        <Icon name="search" />
+        <span>Rechercher…</span>
+        <kbd>{isMac ? '⌘' : 'Ctrl'} K</kbd>
+      </button>
+
+      <div className="erp-top-actions">
+        <div className="erp-menu-wrap">
+          <button type="button" className="erp-create" onClick={() => toggle('create')} aria-expanded={menu === 'create'}>
+            <Icon name="plus" /> Créer
+          </button>
+          {menu === 'create' && (
+            <div className="erp-menu" onMouseLeave={() => setMenu(null)}>
+              {CREATE.map((c, i) => (
+                <button
+                  key={c.kind}
+                  type="button"
+                  className={i === 5 ? 'erp-menu-sep' : undefined}
+                  onClick={() => {
+                    setMenu(null)
+                    onCreate(c.kind)
+                  }}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="erp-menu-wrap">
+          <button
+            type="button"
+            className="erp-icon-btn"
+            title="Notifications"
+            onClick={() => toggle('notif')}
+            aria-expanded={menu === 'notif'}
+          >
+            <Icon name="bell" size={18} />
+            {notifications.length > 0 && (
+              <span className={`erp-notif-count ${danger ? 'erp-notif-danger' : ''}`}>{notifications.length}</span>
+            )}
+          </button>
+          {menu === 'notif' && (
+            <div className="erp-menu erp-notif-menu" onMouseLeave={() => setMenu(null)}>
+              <div className="erp-menu-title">Notifications</div>
+              {notifications.length === 0 ? (
+                <p className="erp-menu-empty">Rien à signaler.</p>
+              ) : (
+                notifications.map((n) => (
+                  <button
+                    key={n.id}
+                    type="button"
+                    className={`erp-notif erp-notif-${n.severity}`}
+                    onClick={() => {
+                      setMenu(null)
+                      onNavigate(n.page)
+                    }}
+                  >
+                    {n.text}
+                  </button>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+
+        <button type="button" className="erp-icon-btn" title="Paramètres" onClick={() => onNavigate('company')}>
+          <Icon name="settings" size={18} />
+        </button>
+      </div>
+    </header>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/TopBar.tsx"
+
+cat > src/shell/WorkTabs.tsx <<'FIN_DU_FICHIER'
+import Icon from './icons'
+import { PAGE_LABELS } from './navigation'
+import type { PageId } from '../types'
+
+interface Props {
+  tabs: PageId[]
+  current: PageId
+  onOpen: (page: PageId) => void
+  onClose: (page: PageId) => void
+}
+
+/** Onglets des écrans ouverts, pour passer de l'un à l'autre sans repasser par le menu */
+export default function WorkTabs({ tabs, current, onOpen, onClose }: Props) {
+  if (tabs.length <= 1) return null
+  return (
+    <div className="erp-tabs no-print" role="tablist">
+      {tabs.map((t) => (
+        <div key={t} className={`erp-tab ${t === current ? 'erp-tab-active' : ''}`} role="tab" aria-selected={t === current}>
+          <button type="button" className="erp-tab-label" onClick={() => onOpen(t)}>
+            {PAGE_LABELS[t]}
+          </button>
+          <button type="button" className="erp-tab-close" title="Fermer l'onglet" onClick={() => onClose(t)}>
+            <Icon name="close" size={12} />
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/WorkTabs.tsx"
+
+cat > src/shell/icons.tsx <<'FIN_DU_FICHIER'
+import type { ModuleId } from './navigation'
+
+const PATHS: Record<ModuleId | 'search' | 'bell' | 'plus' | 'close', string> = {
+  home: 'M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z',
+  sales: 'M4 4h16v16H4z M8 9h8 M8 13h8 M8 17h5',
+  purchases: 'M3 6h3l2.5 10h10L21 9H7.2 M10 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2z M18 20a1 1 0 1 0 0-2 1 1 0 0 0 0 2z',
+  stock: 'M12 3l8 4.5v9L12 21l-8-4.5v-9z M4 7.5l8 4.5 8-4.5 M12 12v9',
+  finance: 'M4 19h16 M6 16V10 M10 16V6 M14 16v-4 M18 16V8',
+  analysis: 'M4 20V4 M4 20h16 M7 15l4-4 3 3 5-6',
+  settings: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z M19.4 13a7.6 7.6 0 0 0 0-2l2-1.6-2-3.4-2.4 1a7.4 7.4 0 0 0-1.7-1L15 3.5h-4l-.3 2.5a7.4 7.4 0 0 0-1.7 1l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2l-2 1.6 2 3.4 2.4-1a7.4 7.4 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7.4 7.4 0 0 0 1.7-1l2.4 1 2-3.4z',
+  search: 'M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z M21 21l-5-5',
+  bell: 'M6 16V11a6 6 0 1 1 12 0v5l2 2H4z M10 21h4',
+  plus: 'M12 5v14 M5 12h14',
+  close: 'M6 6l12 12 M18 6L6 18',
+}
+
+/** Icônes au trait, dessinées en SVG (aucune dépendance) */
+export default function Icon({ name, size = 16 }: { name: keyof typeof PATHS; size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.8}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d={PATHS[name]} />
+    </svg>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/shell/icons.tsx"
+
+cat > src/shell/navigation.ts <<'FIN_DU_FICHIER'
+import type { PageId } from '../types'
+
+export type ModuleId = 'home' | 'sales' | 'purchases' | 'stock' | 'finance' | 'analysis' | 'settings'
+
+export interface ModuleDef {
+  id: ModuleId
+  label: string
+  /** Pages du module, regroupées par rubrique dans le menu de gauche */
+  groups: { title: string; pages: PageId[] }[]
+}
+
+/** Plan de l'application, découpée en modules comme un ERP */
+export const MODULES: ModuleDef[] = [
+  { id: 'home', label: 'Accueil', groups: [{ title: 'Accueil', pages: ['home'] }] },
+  {
+    id: 'sales',
+    label: 'Ventes',
+    groups: [
+      { title: 'Pièces de vente', pages: ['quotes', 'orders', 'deliveries', 'invoices', 'credits'] },
+      { title: 'Suivi', pages: ['depots', 'clients'] },
+    ],
+  },
+  {
+    id: 'purchases',
+    label: 'Achats',
+    groups: [
+      { title: "Pièces d'achat", pages: ['purchases', 'receipts', 'bills'] },
+      { title: 'Tiers', pages: ['suppliers'] },
+    ],
+  },
+  {
+    id: 'stock',
+    label: 'Stocks',
+    groups: [
+      { title: 'Articles', pages: ['catalog', 'kits', 'import'] },
+      { title: 'Stock', pages: ['stock', 'alerts', 'movements', 'inventory'] },
+      { title: 'Traçabilité', pages: ['lots'] },
+    ],
+  },
+  {
+    id: 'finance',
+    label: 'Finance',
+    groups: [
+      { title: 'Trésorerie', pages: ['schedule'] },
+      { title: 'Fiscalité', pages: ['vat'] },
+    ],
+  },
+  {
+    id: 'analysis',
+    label: 'Pilotage',
+    groups: [
+      { title: 'Tableaux de bord', pages: ['dashboard', 'stats'] },
+      { title: 'Rentabilité', pages: ['products', 'breakeven', 'recommendations'] },
+      { title: 'Simulation', pages: ['simulator', 'compare', 'decision'] },
+    ],
+  },
+  {
+    id: 'settings',
+    label: 'Paramètres',
+    groups: [{ title: 'Dossier', pages: ['company', 'backup'] }],
+  },
+]
+
+/** Libellés courts (menu, onglets) */
+export const PAGE_LABELS: Record<PageId, string> = {
+  home: 'Accueil',
+  dashboard: 'Tableau de bord',
+  stats: 'Statistiques ventes',
+  products: 'Rentabilité produits',
+  breakeven: 'Résultat & seuil',
+  recommendations: 'Recommandations',
+  simulator: 'Simulateur',
+  compare: 'Comparaison',
+  decision: 'Garder ou abandonner',
+  catalog: 'Articles',
+  stock: 'État du stock',
+  alerts: 'Alertes stock',
+  movements: 'Mouvements',
+  inventory: 'Inventaire',
+  lots: 'Lots & traçabilité',
+  kits: 'Kits',
+  import: 'Import CSV',
+  quotes: 'Devis',
+  orders: 'Bons de commande',
+  deliveries: 'Bons de livraison',
+  depots: 'Dépôts cliniques',
+  invoices: 'Factures',
+  credits: 'Avoirs',
+  clients: 'Clients',
+  purchases: 'Commandes fournisseurs',
+  receipts: 'Réceptions',
+  bills: 'Factures fournisseurs',
+  suppliers: 'Fournisseurs',
+  schedule: 'Échéancier & trésorerie',
+  vat: 'Déclaration de TVA',
+  company: 'Société & mise en page',
+  backup: 'Sauvegarde',
+}
+
+export function moduleOf(page: PageId): ModuleDef {
+  return MODULES.find((m) => m.groups.some((g) => g.pages.includes(page))) ?? MODULES[0]
+}
+FIN_DU_FICHIER
+echo "OK src/shell/navigation.ts"
+
+cat > src/shell/shell.css <<'FIN_DU_FICHIER'
+/* Structure « ERP » : barre supérieure, ruban des modules, menu du module, onglets, barre d'état */
+.layout.erp {
+  display: grid !important;
+  grid-template-rows: auto auto 1fr auto;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
+}
+.erp-body { display: flex; min-height: 0; overflow: hidden; }
+.layout.erp .sidebar { position: static; height: auto; overflow-y: auto; width: 220px; }
+.layout.erp .sidebar .brand {
+  background: linear-gradient(#f7f9fb, #e9eef4);
+  color: var(--pp-blue);
+  font-size: 14px;
+  padding: 11px 16px;
+  border-bottom: 1px solid var(--pp-border);
+}
+.layout.erp .content { overflow-y: auto; min-height: 0; padding-top: 0; }
+
+/* ---------- Barre supérieure ---------- */
+.erp-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  height: 46px;
+  padding: 0 14px;
+  background: #13293d;
+  color: #e2e8f0;
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  font-size: 13px;
+}
+.erp-topbar button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+.erp-brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 15px; color: #fff !important; }
+.erp-brand small { font-weight: 400; color: #93c5fd; margin-left: 2px; }
+.erp-logo {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 4px;
+  background: #2b6cb0;
+  font-size: 12px;
+  letter-spacing: 0.5px;
+}
+.erp-dossier {
+  padding: 3px 10px;
+  border-left: 1px solid #334e68;
+  color: #cbd5e1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 260px;
+}
+.erp-search-trigger {
+  flex: 1;
+  max-width: 520px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 10px !important;
+  background: #1e3a52 !important;
+  border: 1px solid #335a7a !important;
+  border-radius: 4px;
+  color: #94a3b8 !important;
+  text-align: left;
+}
+.erp-search-trigger:hover { border-color: #60a5fa !important; }
+.erp-search-trigger span { flex: 1; }
+.erp-search-trigger kbd {
+  font-family: inherit;
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid #335a7a;
+  border-radius: 3px;
+  color: #cbd5e1;
+}
+.erp-top-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.erp-create {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 12px !important;
+  background: #2b6cb0 !important;
+  border-radius: 4px;
+  color: #fff !important;
+  font-weight: 600 !important;
+}
+.erp-create:hover { background: #3a7fcb !important; }
+.erp-icon-btn { position: relative; display: grid; place-items: center; width: 34px; height: 34px; border-radius: 4px; }
+.erp-icon-btn:hover { background: #1e3a52 !important; }
+.erp-notif-count {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #d97706;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+}
+.erp-notif-danger { background: #dc2626; }
+
+.erp-menu-wrap { position: relative; }
+.erp-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 60;
+  min-width: 220px;
+  padding: 4px 0;
+  background: #fff;
+  color: var(--pp-text);
+  border: 1px solid var(--pp-border);
+  border-radius: 4px;
+  box-shadow: 0 10px 28px rgba(15, 23, 42, 0.25);
+}
+.erp-menu button { display: block; width: 100%; padding: 7px 14px !important; text-align: left; color: var(--pp-text) !important; }
+.erp-menu button:hover { background: var(--pp-hover) !important; }
+.erp-menu .erp-menu-sep { border-top: 1px solid var(--pp-border-soft) !important; margin-top: 4px; }
+.erp-menu-title { padding: 6px 14px; font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--pp-muted); }
+.erp-menu-empty { padding: 6px 14px; margin: 0; color: var(--pp-muted); }
+.erp-notif-menu { min-width: 320px; }
+.erp-notif { border-left: 3px solid transparent !important; }
+.erp-notif-danger { border-left-color: #dc2626 !important; }
+.erp-notif-warning { border-left-color: #d97706 !important; }
+.erp-notif-info { border-left-color: #2b6cb0 !important; }
+
+/* ---------- Ruban des modules ---------- */
+.erp-modules {
+  display: flex;
+  gap: 2px;
+  padding: 0 10px;
+  background: linear-gradient(#f9fbfc, #e7ecf2);
+  border-bottom: 1px solid var(--pp-border);
+  overflow-x: auto;
+}
+.erp-module {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 14px 8px;
+  background: none;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  font: inherit;
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  font-size: 13px;
+  color: var(--pp-title);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.erp-module:hover { background: rgba(43, 108, 176, 0.08); }
+.erp-module-active { border-bottom-color: var(--pp-blue-2); color: var(--pp-blue); font-weight: 700; background: #fff; }
+
+/* ---------- Onglets de travail et fil d'Ariane ---------- */
+.erp-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 -20px;
+  padding: 6px 20px 0;
+  background: #dfe5ec;
+  border-bottom: 1px solid var(--pp-border);
+  overflow-x: auto;
+}
+.erp-tab {
+  display: flex;
+  align-items: center;
+  background: #eef2f6;
+  border: 1px solid var(--pp-border);
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  font-size: 12.5px;
+}
+.erp-tab-active { background: #fff; position: relative; top: 1px; }
+.layout .content .erp-tab button { background: none; border: 0; box-shadow: none; padding: 5px 8px; }
+.layout .content .erp-tab-label { color: var(--pp-title); white-space: nowrap; }
+.erp-tab-active .erp-tab-label { font-weight: 600; color: var(--pp-blue); }
+.layout .content .erp-tab-close { padding: 5px 6px 5px 0; color: var(--pp-muted); }
+.layout .content .erp-tab-close:hover { color: var(--pp-danger); background: none; }
+
+.erp-breadcrumb { display: flex; align-items: center; gap: 6px; padding: 8px 0 0; font-size: 12px; color: var(--pp-muted); }
+.layout .content .erp-breadcrumb button { background: none; border: 0; padding: 0; color: var(--pp-blue-2); box-shadow: none; font-size: 12px; }
+.layout .content .erp-breadcrumb button:hover { text-decoration: underline; background: none; }
+.erp-breadcrumb strong { color: var(--pp-text); font-weight: 600; }
+.layout.erp .content > h1 { margin-top: 4px; }
+
+/* ---------- Barre d'état ---------- */
+.erp-status {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  height: 24px;
+  padding: 0 14px;
+  background: #13293d;
+  color: #a9b8c8;
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.erp-status-warn { color: #fbbf24; }
+.erp-status-right { margin-left: auto; }
+
+/* ---------- Recherche globale ---------- */
+.erp-search-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 12vh;
+  background: rgba(15, 23, 42, 0.45);
+}
+.erp-search {
+  width: min(680px, calc(100vw - 32px));
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.35);
+  overflow: hidden;
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+}
+.erp-search input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--pp-border);
+  font-size: 15px;
+  outline: none;
+}
+.erp-search-results { max-height: 55vh; overflow-y: auto; padding: 4px 0; }
+.erp-search-hint { margin: 0; padding: 14px 16px; color: var(--pp-muted); font-size: 12.5px; }
+.erp-search-hit {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 12px;
+  width: 100%;
+  padding: 7px 16px;
+  background: none;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.erp-search-hit-active { background: var(--pp-hover); }
+.erp-search-kind { grid-row: span 2; align-self: center; font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--pp-muted); }
+.erp-search-title { font-size: 13.5px; color: var(--pp-text); font-weight: 600; }
+.erp-search-sub { font-size: 12px; color: var(--pp-muted); }
+
+/* ---------- Accueil ---------- */
+.erp-home { padding-top: 6px; }
+.erp-home-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin: 6px 0 14px;
+}
+.erp-home-head h2 { margin: 0; font-size: 20px; color: var(--pp-blue) !important; }
+.erp-home-head p { margin: 2px 0 0; color: var(--pp-muted); text-transform: none; }
+.erp-quick { display: flex; gap: 6px; flex-wrap: wrap; }
+.erp-tile-group { margin-bottom: 16px; }
+.erp-tile-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--pp-title);
+}
+.erp-tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; }
+.layout .content .erp-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-height: 104px;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1px solid var(--pp-border);
+  border-top: 3px solid var(--pp-blue-2);
+  border-radius: 4px;
+  text-align: left;
+  cursor: pointer;
+  transition: box-shadow 0.15s, transform 0.15s;
+}
+.layout .content .erp-tile:hover { background: #fff; box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12); transform: translateY(-1px); }
+.layout .content .erp-tile-danger { border-top-color: #dc2626; }
+.layout .content .erp-tile-warning { border-top-color: #d97706; }
+.layout .content .erp-tile-good { border-top-color: #16a34a; }
+.erp-tile-title { font-size: 12px; font-weight: 600; color: var(--pp-title); }
+.erp-tile-value { font-size: 24px; font-weight: 700; color: var(--pp-text); }
+.erp-tile-danger .erp-tile-value { color: #b91c1c; }
+.erp-tile-sub { font-size: 11.5px; color: var(--pp-muted); }
+
+@media print {
+  .layout.erp { display: block !important; height: auto; overflow: visible; }
+  .erp-body { display: block; overflow: visible; }
+  .layout.erp .content { overflow: visible; }
+}
+
+/* L'application occupe toute la fenêtre */
+body:has(.layout.erp) { margin: 0; }
+@media screen {
+  .layout.erp .print-only { display: none; }
+}
+FIN_DU_FICHIER
+echo "OK src/shell/shell.css"
+
 cat > src/pro-theme.css <<'FIN_DU_FICHIER'
 /*
  * Thème « progiciel de gestion » (inspiré de Sage 100) : navigation à gauche en sections,
@@ -5719,98 +6760,34 @@ echo "OK src/pro-theme.css"
 
 cat > src/components/Sidebar.tsx <<'FIN_DU_FICHIER'
 import type { PageId } from '../types'
+import { PAGE_LABELS, type ModuleDef } from '../shell/navigation'
 
 interface SidebarProps {
+  module: ModuleDef
   current: PageId
   onNavigate: (page: PageId) => void
   /** Compteurs d'alertes affichés à côté des pages (factures échues, lots périmés…) */
   badges?: Partial<Record<PageId, number>>
 }
 
-const sections: { title: string; items: { id: PageId; label: string }[] }[] = [
-  {
-    title: 'Pilotage',
-    items: [
-      { id: 'dashboard', label: 'Tableau de bord' },
-      { id: 'stats', label: 'Statistiques ventes' },
-      { id: 'schedule', label: 'Échéancier & trésorerie' },
-      { id: 'products', label: 'Rentabilité produits' },
-      { id: 'breakeven', label: 'Résultat & seuil' },
-      { id: 'recommendations', label: 'Recommandations' },
-    ],
-  },
-  {
-    title: 'Articles & stock',
-    items: [
-      { id: 'catalog', label: 'Mes produits' },
-      { id: 'stock', label: 'Stock' },
-      { id: 'alerts', label: 'Alertes stock' },
-      { id: 'movements', label: 'Mouvements de stock' },
-      { id: 'inventory', label: 'Inventaire' },
-      { id: 'lots', label: 'Lots & traçabilité' },
-      { id: 'kits', label: 'Kits' },
-      { id: 'import', label: 'Import CSV' },
-    ],
-  },
-  {
-    title: 'Ventes',
-    items: [
-      { id: 'quotes', label: 'Devis' },
-      { id: 'orders', label: 'Bons de commande' },
-      { id: 'deliveries', label: 'Bons de livraison' },
-      { id: 'depots', label: 'Dépôts cliniques' },
-      { id: 'invoices', label: 'Factures' },
-      { id: 'credits', label: 'Avoirs' },
-      { id: 'clients', label: 'Clients' },
-    ],
-  },
-  {
-    title: 'Achats',
-    items: [
-      { id: 'purchases', label: 'Commandes fournisseurs' },
-      { id: 'receipts', label: 'Réceptions' },
-      { id: 'bills', label: 'Factures fournisseurs' },
-      { id: 'suppliers', label: 'Fournisseurs' },
-    ],
-  },
-  {
-    title: 'Analyse & fiscalité',
-    items: [
-      { id: 'vat', label: 'Déclaration de TVA' },
-      { id: 'simulator', label: 'Simulateur' },
-      { id: 'compare', label: 'Comparaison' },
-      { id: 'decision', label: 'Garder ou abandonner' },
-    ],
-  },
-  {
-    title: 'Paramètres',
-    items: [
-      { id: 'company', label: 'Mon entreprise' },
-      { id: 'backup', label: 'Sauvegarde' },
-    ],
-  },
-]
-
-export default function Sidebar({ current, onNavigate, badges }: SidebarProps) {
+/** Menu du module en cours, rubrique par rubrique */
+export default function Sidebar({ module, current, onNavigate, badges }: SidebarProps) {
   return (
-    <aside className="sidebar">
-      <div className="brand">
-        ProfitPilot
-        <small>Gestion commerciale</small>
-      </div>
+    <aside className="sidebar no-print">
+      <div className="brand">{module.label}</div>
       <nav>
-        {sections.map((section) => (
-          <div key={section.title}>
-            <div className="nav-section-title">{section.title}</div>
-            {section.items.map((item) => {
-              const badge = badges?.[item.id]
+        {module.groups.map((group) => (
+          <div key={group.title}>
+            <div className="nav-section-title">{group.title}</div>
+            {group.pages.map((id) => {
+              const badge = badges?.[id]
               return (
                 <button
-                  key={item.id}
-                  className={item.id === current ? 'nav-item active' : 'nav-item'}
-                  onClick={() => onNavigate(item.id)}
+                  key={id}
+                  className={id === current ? 'nav-item active' : 'nav-item'}
+                  onClick={() => onNavigate(id)}
                 >
-                  {item.label}
+                  {PAGE_LABELS[id]}
                   {!!badge && <span className="nav-badge">{badge}</span>}
                 </button>
               )
@@ -6133,15 +7110,26 @@ import { applyMove, expiryState } from './documents/stockMoves'
 import { useCashBalance, useCompany, useDocuments, useKits, useLots, useMovements, useParties } from './documents/storage'
 import type { DocKind, DocLine, StockMovement } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
+import TopBar, { type Notification } from './shell/TopBar'
+import ModuleBar from './shell/ModuleBar'
+import WorkTabs from './shell/WorkTabs'
+import StatusBar from './shell/StatusBar'
+import GlobalSearch, { type SearchHit } from './shell/GlobalSearch'
+import Launchpad from './shell/Launchpad'
+import { MODULES, moduleOf, type ModuleId } from './shell/navigation'
+import { LAST_BACKUP_KEY } from './documents/storage'
+import { daysBetween, today } from './documents/numbering'
 import './theme.css'
 import './documents/documents.css'
 import './pro-theme.css'
+import './shell/shell.css'
 
 const STORAGE_KEY = 'profitpilot:v1'
 const FIXED_KEY = 'profitpilot:fixed:v1'
 const CURRENCY_KEY = 'profitpilot:currency:v1'
 
 const titles: Record<PageId, string> = {
+  home: 'Accueil',
   dashboard: 'Tableau de bord',
   catalog: 'Mes produits',
   stock: 'Gestion du stock',
@@ -6171,7 +7159,7 @@ const titles: Record<PageId, string> = {
   lots: 'Lots, péremptions & traçabilité',
   kits: 'Kits',
   vat: 'Déclaration de TVA',
-  company: 'Mon entreprise',
+  company: 'Société et mise en page des documents',
   backup: 'Sauvegarde des données',
 }
 
@@ -6200,6 +7188,7 @@ const pageOfKind: Record<DocKind, PageId> = {
 // Écrans de gestion commerciale : montants en dirhams, sans sélecteur de devise ni export produits
 const commercialPages = new Set<PageId>([
   ...Object.keys(docPages),
+  'home',
   'depots',
   'clients',
   'suppliers',
@@ -6272,7 +7261,12 @@ function loadCurrency(): string {
 
 export default function App() {
   const [initial] = useState(loadSaved)
-  const [page, setPage] = useState<PageId>('dashboard')
+  const [page, setPage] = useState<PageId>('home')
+  // Onglets de travail : écrans ouverts récemment
+  const [tabs, setTabs] = useState<PageId[]>(['home'])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [lotQuery, setLotQuery] = useState('')
+  const [partyId, setPartyId] = useState<string | undefined>()
   // Pièce à ouvrir directement en arrivant sur une page (après une conversion ou une facturation de dépôt)
   const [openId, setOpenId] = useState<string | undefined>()
   const [products, setProducts] = useState<Product[]>(initial?.products ?? sampleProducts)
@@ -6320,15 +7314,60 @@ export default function App() {
     }
   }
 
+  function show(next: PageId) {
+    setPage(next)
+    setTabs((t) => (t.includes(next) ? t : [...t, next].slice(-8)))
+  }
+
   function navigate(next: PageId) {
     setOpenId(undefined)
-    setPage(next)
+    setPartyId(undefined)
+    setLotQuery('')
+    show(next)
   }
 
   function openDocument(kind: DocKind, id?: string) {
     setOpenId(id)
-    setPage(pageOfKind[kind])
+    show(pageOfKind[kind])
   }
+
+  function closeTab(t: PageId) {
+    const rest = tabs.filter((x) => x !== t)
+    const next = rest.length ? rest : (['home'] as PageId[])
+    setTabs(next)
+    if (t === page) navigate(next[next.length - 1])
+  }
+
+  function pickSearch(hit: SearchHit) {
+    setSearchOpen(false)
+    if (hit.type === 'doc') return openDocument(hit.doc.kind, hit.doc.id)
+    if (hit.type === 'party') {
+      navigate(hit.party.role === 'client' ? 'clients' : 'suppliers')
+      return setPartyId(hit.party.id)
+    }
+    if (hit.type === 'product') return navigate('catalog')
+    navigate('lots')
+    setLotQuery(hit.lot.serial || hit.lot.lot)
+  }
+
+  // Raccourcis clavier : Cmd/Ctrl+K recherche, Alt+1…7 modules
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setSearchOpen((o) => !o)
+      }
+      if (e.altKey && /^[1-7]$/.test(e.key)) {
+        e.preventDefault()
+        const m = MODULES[Number(e.key) - 1]
+        setOpenId(undefined)
+        setPage(m.groups[0].pages[0])
+        setTabs((t) => (t.includes(m.groups[0].pages[0]) ? t : [...t, m.groups[0].pages[0]].slice(-8)))
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   function handleEdit(next: Product[]) {
     setProducts(next)
@@ -6387,16 +7426,75 @@ export default function App() {
     }
   }, [documents, lots, stockAlerts])
 
+  const lastBackup = (() => {
+    try {
+      return localStorage.getItem(LAST_BACKUP_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })()
+
+  const notifications = useMemo<Notification[]>(() => {
+    const list: Notification[] = []
+    if (badges.invoices) list.push({ id: 'inv', severity: 'danger', page: 'invoices', text: `${badges.invoices} facture(s) client échue(s) à relancer` })
+    if (badges.bills) list.push({ id: 'bill', severity: 'warning', page: 'bills', text: `${badges.bills} facture(s) fournisseur échue(s)` })
+    if (stockAlerts.out) list.push({ id: 'out', severity: 'danger', page: 'alerts', text: `${stockAlerts.out} article(s) en rupture de stock` })
+    if (stockAlerts.low) list.push({ id: 'low', severity: 'warning', page: 'alerts', text: `${stockAlerts.low} article(s) sous le seuil d'alerte` })
+    if (stockAlerts.expired) list.push({ id: 'exp', severity: 'danger', page: 'lots', text: `${stockAlerts.expired} lot(s) périmé(s) à retirer` })
+    if (badges.depots) list.push({ id: 'dep', severity: 'info', page: 'depots', text: `${badges.depots} implant(s) en dépôt chez les cliniques` })
+    if (!lastBackup || daysBetween(lastBackup, today()) > 7)
+      list.push({ id: 'bak', severity: 'warning', page: 'backup', text: lastBackup ? 'Dernière sauvegarde il y a plus de 7 jours' : 'Aucune sauvegarde effectuée' })
+    return list
+  }, [badges, stockAlerts, lastBackup])
+
+  const currentModule = moduleOf(page)
+  const moduleBadges: Partial<Record<ModuleId, number>> = {
+    sales: badges.invoices,
+    purchases: badges.bills,
+    stock: stockAlerts.total,
+  }
+
   return (
-    <div className="layout">
-      <Sidebar current={page} onNavigate={navigate} badges={badges} />
+    <div className="layout erp">
+      <TopBar
+        companyName={company.name}
+        notifications={notifications}
+        onSearch={() => setSearchOpen(true)}
+        onNavigate={navigate}
+        onCreate={(kind) => openDocument(kind, 'new')}
+      />
+      <ModuleBar current={currentModule.id} onOpen={navigate} badges={moduleBadges} />
+      <div className="erp-body">
+      {currentModule.id !== 'home' && (
+        <Sidebar module={currentModule} current={page} onNavigate={navigate} badges={badges} />
+      )}
       <main className="content">
+        <WorkTabs tabs={tabs} current={page} onOpen={navigate} onClose={closeTab} />
+        <div className="erp-breadcrumb no-print">
+          <button type="button" onClick={() => navigate('home')}>
+            Accueil
+          </button>
+          {currentModule.id !== 'home' && (
+            <>
+              <span>›</span>
+              <button type="button" onClick={() => navigate(currentModule.groups[0].pages[0])}>
+                {currentModule.label}
+              </button>
+            </>
+          )}
+          {page !== 'home' && (
+            <>
+              <span>›</span>
+              <strong>{titles[page]}</strong>
+            </>
+          )}
+        </div>
         <p className="print-only">
           ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
           {isSampleData ? ' · données de démonstration' : ''}
         </p>
-        <h1>{titles[page]}</h1>
-        {stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && (
+        {page !== 'home' && <h1>{titles[page]}</h1>}
+        {stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && (
           <div className="stock-alert-banner no-print">
             <span>
               <strong>Alerte stock :</strong>{' '}
@@ -6432,6 +7530,18 @@ export default function App() {
             </div>
             <ExportBar products={products} />
           </>
+        )}
+        {page === 'home' && (
+          <Launchpad
+            companyName={company.name}
+            documents={documents}
+            products={products}
+            lots={lots}
+            cash={cash}
+            onNavigate={navigate}
+            onOpenDocument={openDocument}
+            onCreate={(kind) => openDocument(kind, 'new')}
+          />
         )}
         {page === 'dashboard' && (
           <Dashboard products={products} documents={documents} lots={lots} onNavigate={navigate} />
@@ -6487,12 +7597,14 @@ export default function App() {
           />
         )}
         {page === 'clients' && (
-          <PartiesPage role="client" parties={parties} onChange={setParties} documents={documents} company={company} />
+          <PartiesPage key={partyId} role="client" parties={parties} onChange={setParties} documents={documents} company={company} openId={partyId} />
         )}
         {page === 'suppliers' && (
-          <PartiesPage role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} />
+          <PartiesPage key={partyId} role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} openId={partyId} />
         )}
-        {page === 'lots' && <LotsPage lots={lots} onChange={setLots} products={products} documents={documents} />}
+        {page === 'lots' && (
+          <LotsPage key={lotQuery} lots={lots} onChange={setLots} products={products} documents={documents} initialQuery={lotQuery} />
+        )}
         {page === 'alerts' && (
           <StockAlertsPage
             products={products}
@@ -6516,6 +7628,18 @@ export default function App() {
         {page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
         {page === 'backup' && <BackupPage />}
       </main>
+      </div>
+      <StatusBar companyName={company.name} documentsCount={documents.length} productsCount={products.length} lastBackup={lastBackup} />
+      {searchOpen && (
+        <GlobalSearch
+          documents={documents}
+          parties={parties}
+          products={products}
+          lots={lots}
+          onPick={pickSearch}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
     </div>
   )
 }
@@ -6523,7 +7647,7 @@ FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
 # Nouvelles pages dans le type PageId
-for id in stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
+for id in home stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
   grep -q "'$id'" src/types.ts || sed -i.tmp "s/'decision'/'decision' | '$id'/" src/types.ts
 done
 rm -f src/types.ts.tmp

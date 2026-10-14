@@ -40,3 +40,21 @@ export function frDate(d: string | undefined): string {
 export function emptyLine(): DocLine {
 	return { id: newId(), description: '', quantity: 1, unitPriceHT: 0, tvaRate: 20, discount: 0 }
 }
+
+/** Nouvelle pièce vierge (brouillon numéroté) */
+export function newDocument(kind: DocKind, docs: CommercialDocument[]): CommercialDocument {
+	const date = today()
+	return {
+		id: newId(),
+		kind,
+		number: nextNumber(kind, docs, date),
+		date,
+		// Facture : délai légal de paiement par défaut de 60 jours ; devis : validité de 30 jours
+		dueDate: addDays(date, kind === 'quote' ? 30 : 60),
+		party: { name: '', address: '', city: '', ice: '', ifNumber: '', rc: '', phone: '', email: '' },
+		lines: [emptyLine()],
+		status: 'draft',
+		paymentMethod: 'virement',
+		notes: '',
+	}
+}

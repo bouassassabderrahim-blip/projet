@@ -6,7 +6,7 @@ import PaymentDialog from './PaymentDialog'
 import ReminderPrint from './ReminderPrint'
 import { downloadCsv, journal } from './csv'
 import { balanceOf, isActive, isOverdue, paidAmount, sign } from './ledger'
-import { addDays, emptyLine, frDate, newId, nextNumber, today } from './numbering'
+import { addDays, frDate, newDocument, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
 	DOC_LABELS,
@@ -84,6 +84,8 @@ export default function DocumentsPage({
 	onStockMove,
 }: Props) {
 	const [view, setView] = useState<View>(() => {
+		// « new » : création directe depuis le bouton Créer ou l'accueil
+		if (openId === 'new') return { mode: 'edit', doc: newDocument(kind, documents) }
 		const doc = openId ? documents.find((d) => d.id === openId) : undefined
 		if (!doc) return { mode: 'list' }
 		// Une pièce validée s'ouvre en consultation, un brouillon en modification
@@ -144,19 +146,7 @@ export default function DocumentsPage({
 	}, [documents, kind, now])
 
 	function createDoc(): CommercialDocument {
-		return {
-			id: newId(),
-			kind,
-			number: nextNumber(kind, documents, now),
-			date: now,
-			// Facture : délai légal de paiement par défaut de 60 jours ; devis : validité de 30 jours
-			dueDate: addDays(now, kind === 'quote' ? 30 : 60),
-			party: emptyParty(),
-			lines: [emptyLine()],
-			status: 'draft',
-			paymentMethod: 'virement',
-			notes: '',
-		}
+		return newDocument(kind, documents)
 	}
 
 	/** Ajoute le tiers au fichier clients / fournisseurs s'il n'y est pas encore */

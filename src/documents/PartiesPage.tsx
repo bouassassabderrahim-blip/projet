@@ -20,6 +20,8 @@ interface Props {
 	onChange: (parties: PartyRecord[]) => void
 	documents: CommercialDocument[]
 	company: CompanyInfo
+	/** Fiche à ouvrir directement (recherche globale) */
+	openId?: string
 }
 
 const fields: { key: 'name' | 'address' | 'city' | 'ice' | 'ifNumber' | 'rc' | 'phone' | 'email'; label: string }[] = [
@@ -36,9 +38,9 @@ const fields: { key: 'name' | 'address' | 'city' | 'ice' | 'ifNumber' | 'rc' | '
 const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
 
 /** Fichier clients ou fournisseurs : fiche, chiffre d'affaires, encours, historique, relance */
-export default function PartiesPage({ role, parties, onChange, documents, company }: Props) {
+export default function PartiesPage({ role, parties, onChange, documents, company, openId }: Props) {
 	const [query, setQuery] = useState('')
-	const [editing, setEditing] = useState<PartyRecord | null>(null)
+	const [editing, setEditing] = useState<PartyRecord | null>(() => parties.find((p) => p.id === openId) ?? null)
 	const [reminder, setReminder] = useState<string | null>(null)
 	const [error, setError] = useState('')
 	const now = today()

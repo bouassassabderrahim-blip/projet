@@ -10,6 +10,8 @@ interface Props {
 	onChange: (lots: StockLot[]) => void
 	products: Product[]
 	documents: CommercialDocument[]
+	/** Recherche initiale (lot ou n° de série venant de la recherche globale) */
+	initialQuery?: string
 }
 
 const EXPIRY_LABELS: Record<ExpiryState, string> = {
@@ -22,9 +24,9 @@ const EXPIRY_LABELS: Record<ExpiryState, string> = {
 type Filter = '' | 'available' | 'expired' | 'soon'
 
 /** Stock par lot / numéro de série, péremptions et traçabilité (rappel de lot) */
-export default function LotsPage({ lots, onChange, products, documents }: Props) {
-	const [query, setQuery] = useState('')
-	const [filter, setFilter] = useState<Filter>('available')
+export default function LotsPage({ lots, onChange, products, documents, initialQuery = '' }: Props) {
+	const [query, setQuery] = useState(initialQuery)
+	const [filter, setFilter] = useState<Filter>(initialQuery ? '' : 'available')
 	const [draft, setDraft] = useState({ productId: '', lot: '', serial: '', expiry: '', quantity: '1', supplier: '' })
 	const [error, setError] = useState('')
 	const now = today()

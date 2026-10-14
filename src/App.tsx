@@ -32,15 +32,26 @@ import { applyMove, expiryState } from './documents/stockMoves'
 import { useCashBalance, useCompany, useDocuments, useKits, useLots, useMovements, useParties } from './documents/storage'
 import type { DocKind, DocLine, StockMovement } from './documents/types'
 import { CURRENCIES, setCurrency } from './utils/finance'
+import TopBar, { type Notification } from './shell/TopBar'
+import ModuleBar from './shell/ModuleBar'
+import WorkTabs from './shell/WorkTabs'
+import StatusBar from './shell/StatusBar'
+import GlobalSearch, { type SearchHit } from './shell/GlobalSearch'
+import Launchpad from './shell/Launchpad'
+import { MODULES, moduleOf, type ModuleId } from './shell/navigation'
+import { LAST_BACKUP_KEY } from './documents/storage'
+import { daysBetween, today } from './documents/numbering'
 import './theme.css'
 import './documents/documents.css'
 import './pro-theme.css'
+import './shell/shell.css'
 
 const STORAGE_KEY = 'profitpilot:v1'
 const FIXED_KEY = 'profitpilot:fixed:v1'
 const CURRENCY_KEY = 'profitpilot:currency:v1'
 
 const titles: Record<PageId, string> = {
+	home: 'Accueil',
 	dashboard: 'Tableau de bord',
 	catalog: 'Mes produits',
 	stock: 'Gestion du stock',
@@ -70,7 +81,7 @@ const titles: Record<PageId, string> = {
 	lots: 'Lots, péremptions & traçabilité',
 	kits: 'Kits',
 	vat: 'Déclaration de TVA',
-	company: 'Mon entreprise',
+	company: 'Société et mise en page des documents',
 	backup: 'Sauvegarde des données',
 }
 
@@ -99,6 +110,7 @@ const pageOfKind: Record<DocKind, PageId> = {
 // Écrans de gestion commerciale : montants en dirhams, sans sélecteur de devise ni export produits
 const commercialPages = new Set<PageId>([
 	...Object.keys(docPages),
+	'home',
 	'depots',
 	'clients',
 	'suppliers',
@@ -171,7 +183,12 @@ function loadCurrency(): string {
 
 export default function App() {
 	const [initial] = useState(loadSaved)
-	const [page, setPage] = useState<PageId>('dashboard')
+	const [page, setPage] = useState<PageId>('home')
+	// Onglets de travail : écrans ouverts récemment
+	const [tabs, setTabs] = useState<PageId[]>(['home'])
+	const [searchOpen, setSearchOpen] = useState(false)
+	const [lotQuery, setLotQuery] = useState('')
+	const [partyId, setPartyId] = useState<string | undefined>()
 	// Pièce à ouvrir directement en arrivant sur une page (après une conversion ou une facturation de dépôt)
 	const [openId, setOpenId] = useState<string | undefined>()
 	const [products, setProducts] = useState<Product[]>(initial?.products ?? sampleProducts)
@@ -219,15 +236,60 @@ export default function App() {
 		}
 	}
 
+	function show(next: PageId) {
+		setPage(next)
+		setTabs((t) => (t.includes(next) ? t : [...t, next].slice(-8)))
+	}
+
 	function navigate(next: PageId) {
 		setOpenId(undefined)
-		setPage(next)
+		setPartyId(undefined)
+		setLotQuery('')
+		show(next)
 	}
 
 	function openDocument(kind: DocKind, id?: string) {
 		setOpenId(id)
-		setPage(pageOfKind[kind])
+		show(pageOfKind[kind])
 	}
+
+	function closeTab(t: PageId) {
+		const rest = tabs.filter((x) => x !== t)
+		const next = rest.length ? rest : (['home'] as PageId[])
+		setTabs(next)
+		if (t === page) navigate(next[next.length - 1])
+	}
+
+	function pickSearch(hit: SearchHit) {
+		setSearchOpen(false)
+		if (hit.type === 'doc') return openDocument(hit.doc.kind, hit.doc.id)
+		if (hit.type === 'party') {
+			navigate(hit.party.role === 'client' ? 'clients' : 'suppliers')
+			return setPartyId(hit.party.id)
+		}
+		if (hit.type === 'product') return navigate('catalog')
+		navigate('lots')
+		setLotQuery(hit.lot.serial || hit.lot.lot)
+	}
+
+	// Raccourcis clavier : Cmd/Ctrl+K recherche, Alt+1…7 modules
+	useEffect(() => {
+		function onKey(e: KeyboardEvent) {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+				e.preventDefault()
+				setSearchOpen((o) => !o)
+			}
+			if (e.altKey && /^[1-7]$/.test(e.key)) {
+				e.preventDefault()
+				const m = MODULES[Number(e.key) - 1]
+				setOpenId(undefined)
+				setPage(m.groups[0].pages[0])
+				setTabs((t) => (t.includes(m.groups[0].pages[0]) ? t : [...t, m.groups[0].pages[0]].slice(-8)))
+			}
+		}
+		window.addEventListener('keydown', onKey)
+		return () => window.removeEventListener('keydown', onKey)
+	}, [])
 
 	function handleEdit(next: Product[]) {
 		setProducts(next)
@@ -286,16 +348,75 @@ export default function App() {
 		}
 	}, [documents, lots, stockAlerts])
 
+	const lastBackup = (() => {
+		try {
+			return localStorage.getItem(LAST_BACKUP_KEY) ?? ''
+		} catch {
+			return ''
+		}
+	})()
+
+	const notifications = useMemo<Notification[]>(() => {
+		const list: Notification[] = []
+		if (badges.invoices) list.push({ id: 'inv', severity: 'danger', page: 'invoices', text: `${badges.invoices} facture(s) client échue(s) à relancer` })
+		if (badges.bills) list.push({ id: 'bill', severity: 'warning', page: 'bills', text: `${badges.bills} facture(s) fournisseur échue(s)` })
+		if (stockAlerts.out) list.push({ id: 'out', severity: 'danger', page: 'alerts', text: `${stockAlerts.out} article(s) en rupture de stock` })
+		if (stockAlerts.low) list.push({ id: 'low', severity: 'warning', page: 'alerts', text: `${stockAlerts.low} article(s) sous le seuil d'alerte` })
+		if (stockAlerts.expired) list.push({ id: 'exp', severity: 'danger', page: 'lots', text: `${stockAlerts.expired} lot(s) périmé(s) à retirer` })
+		if (badges.depots) list.push({ id: 'dep', severity: 'info', page: 'depots', text: `${badges.depots} implant(s) en dépôt chez les cliniques` })
+		if (!lastBackup || daysBetween(lastBackup, today()) > 7)
+			list.push({ id: 'bak', severity: 'warning', page: 'backup', text: lastBackup ? 'Dernière sauvegarde il y a plus de 7 jours' : 'Aucune sauvegarde effectuée' })
+		return list
+	}, [badges, stockAlerts, lastBackup])
+
+	const currentModule = moduleOf(page)
+	const moduleBadges: Partial<Record<ModuleId, number>> = {
+		sales: badges.invoices,
+		purchases: badges.bills,
+		stock: stockAlerts.total,
+	}
+
 	return (
-		<div className="layout">
-			<Sidebar current={page} onNavigate={navigate} badges={badges} />
+		<div className="layout erp">
+			<TopBar
+				companyName={company.name}
+				notifications={notifications}
+				onSearch={() => setSearchOpen(true)}
+				onNavigate={navigate}
+				onCreate={(kind) => openDocument(kind, 'new')}
+			/>
+			<ModuleBar current={currentModule.id} onOpen={navigate} badges={moduleBadges} />
+			<div className="erp-body">
+			{currentModule.id !== 'home' && (
+				<Sidebar module={currentModule} current={page} onNavigate={navigate} badges={badges} />
+			)}
 			<main className="content">
+				<WorkTabs tabs={tabs} current={page} onOpen={navigate} onClose={closeTab} />
+				<div className="erp-breadcrumb no-print">
+					<button type="button" onClick={() => navigate('home')}>
+						Accueil
+					</button>
+					{currentModule.id !== 'home' && (
+						<>
+							<span>›</span>
+							<button type="button" onClick={() => navigate(currentModule.groups[0].pages[0])}>
+								{currentModule.label}
+							</button>
+						</>
+					)}
+					{page !== 'home' && (
+						<>
+							<span>›</span>
+							<strong>{titles[page]}</strong>
+						</>
+					)}
+				</div>
 				<p className="print-only">
 					ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
 					{isSampleData ? ' · données de démonstration' : ''}
 				</p>
-				<h1>{titles[page]}</h1>
-				{stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && (
+				{page !== 'home' && <h1>{titles[page]}</h1>}
+				{stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && (
 					<div className="stock-alert-banner no-print">
 						<span>
 							<strong>Alerte stock :</strong>{' '}
@@ -331,6 +452,18 @@ export default function App() {
 						</div>
 						<ExportBar products={products} />
 					</>
+				)}
+				{page === 'home' && (
+					<Launchpad
+						companyName={company.name}
+						documents={documents}
+						products={products}
+						lots={lots}
+						cash={cash}
+						onNavigate={navigate}
+						onOpenDocument={openDocument}
+						onCreate={(kind) => openDocument(kind, 'new')}
+					/>
 				)}
 				{page === 'dashboard' && (
 					<Dashboard products={products} documents={documents} lots={lots} onNavigate={navigate} />
@@ -386,12 +519,14 @@ export default function App() {
 					/>
 				)}
 				{page === 'clients' && (
-					<PartiesPage role="client" parties={parties} onChange={setParties} documents={documents} company={company} />
+					<PartiesPage key={partyId} role="client" parties={parties} onChange={setParties} documents={documents} company={company} openId={partyId} />
 				)}
 				{page === 'suppliers' && (
-					<PartiesPage role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} />
+					<PartiesPage key={partyId} role="supplier" parties={parties} onChange={setParties} documents={documents} company={company} openId={partyId} />
 				)}
-				{page === 'lots' && <LotsPage lots={lots} onChange={setLots} products={products} documents={documents} />}
+				{page === 'lots' && (
+					<LotsPage key={lotQuery} lots={lots} onChange={setLots} products={products} documents={documents} initialQuery={lotQuery} />
+				)}
 				{page === 'alerts' && (
 					<StockAlertsPage
 						products={products}
@@ -415,6 +550,18 @@ export default function App() {
 				{page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
 				{page === 'backup' && <BackupPage />}
 			</main>
+			</div>
+			<StatusBar companyName={company.name} documentsCount={documents.length} productsCount={products.length} lastBackup={lastBackup} />
+			{searchOpen && (
+				<GlobalSearch
+					documents={documents}
+					parties={parties}
+					products={products}
+					lots={lots}
+					onPick={pickSearch}
+					onClose={() => setSearchOpen(false)}
+				/>
+			)}
 		</div>
 	)
 }
