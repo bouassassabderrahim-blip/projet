@@ -337,7 +337,7 @@ export default function SyncPage() {
 				<legend>À savoir</legend>
 				<ul className="sync-steps">
 					<li>Les comptes de connexion (e-mail + mot de passe) se créent dans Supabase ; les profils et droits ProfitPilot (code PIN) restent ceux de Paramètres › Utilisateurs et sont partagés entre les postes.</li>
-					<li>Sans Internet, on continue à travailler : les modifications partent au retour de la connexion. Seule la validation des pièces (numéro définitif) demande d'être en ligne.</li>
+					<li>Sans Internet, on continue à travailler : les modifications partent au retour de la connexion. Seules la validation et l'annulation des pièces, et la reprise d'un dépôt, demandent d'être en ligne (le serveur les accorde à un seul poste).</li>
 					<li>Données de patients : leur hébergement est soumis à la loi 09-08 (CNDP). Choisissez une région européenne pour le projet et renseignez-vous auprès de la CNDP.</li>
 				</ul>
 			</fieldset>
