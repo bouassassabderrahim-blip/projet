@@ -18,7 +18,14 @@ export const MOVES_KEY = 'profitpilot:movements:v1'
 export const CASH_KEY = 'profitpilot:cash:v1'
 export const LAST_BACKUP_KEY = 'profitpilot:last-backup'
 
-/** État React sauvegardé dans le localStorage, avec validation à la relecture */
+/** Événement émis quand le navigateur refuse d'enregistrer (stockage plein) */
+export const STORAGE_ERROR_EVENT = 'profitpilot:storage-error'
+
+/**
+ * État React sauvegardé dans le localStorage, avec validation à la relecture.
+ * Les autres onglets ouverts sont tenus à jour (événement « storage ») pour ne jamais
+ * écraser une saisie faite ailleurs ; un échec d'enregistrement est signalé à l'application.
+ */
 export function usePersistentState<T>(key: string, fallback: () => T, isValid: (x: unknown) => x is T) {
 	const [value, setValue] = useState<T>(() => {
 		try {
@@ -35,14 +42,49 @@ export function usePersistentState<T>(key: string, fallback: () => T, isValid: (
 
 	useEffect(() => {
 		try {
-			localStorage.setItem(key, JSON.stringify(value))
+			const raw = JSON.stringify(value)
+			// Pas de réécriture si la valeur vient d'un autre onglet
+			if (localStorage.getItem(key) !== raw) localStorage.setItem(key, raw)
 		} catch {
-			// stockage indisponible : on continue sans sauvegarde
+			window.dispatchEvent(new CustomEvent(STORAGE_ERROR_EVENT, { detail: key }))
 		}
 	}, [key, value])
 
+	useEffect(() => {
+		function onStorage(e: StorageEvent) {
+			if (e.key !== key || e.newValue === null) return
+			try {
+				const data: unknown = JSON.parse(e.newValue)
+				if (isValid(data)) setValue(data)
+			} catch {
+				// valeur illisible : on garde l'état courant
+			}
+		}
+		window.addEventListener('storage', onStorage)
+		return () => window.removeEventListener('storage', onStorage)
+		// isValid est une fonction stable définie au niveau du module
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [key])
+
 	return [value, setValue] as const
 }
+
+/** Place occupée par les données de l'application (en caractères, ~ octets) */
+export function storageUsage(): number {
+	let size = 0
+	try {
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i)
+			if (k?.startsWith('profitpilot:')) size += k.length + (localStorage.getItem(k) ?? '').length
+		}
+	} catch {
+		// stockage indisponible
+	}
+	return size
+}
+
+/** Limite courante des navigateurs pour le localStorage (≈ 5 millions de caractères) */
+export const STORAGE_LIMIT = 5_000_000
 
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null
 

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useAccess } from '../access/context'
 import { downloadFile } from './csv'
-import { LAST_BACKUP_KEY, createBackup, isBackupFile, restoreBackup } from './storage'
+import { LAST_BACKUP_KEY, STORAGE_LIMIT, createBackup, isBackupFile, restoreBackup, storageUsage } from './storage'
 import { daysBetween, frDate, today } from './numbering'
 import './documents.css'
 
@@ -20,6 +20,8 @@ export default function BackupPage() {
 	const [error, setError] = useState('')
 	const access = useAccess()
 	const age = last ? daysBetween(last, today()) : null
+	const used = storageUsage()
+	const usedPct = Math.min(100, Math.round((used / STORAGE_LIMIT) * 100))
 
 	function exportAll() {
 		const backup = createBackup()
@@ -61,6 +63,17 @@ export default function BackupPage() {
 				Vos données sont enregistrées uniquement dans ce navigateur : vider le cache ou changer d'ordinateur les fait
 				perdre. Sauvegardez au moins une fois par semaine et gardez le fichier en lieu sûr (clé USB, Google Drive…).
 			</div>
+
+			<fieldset className="doc-panel">
+				<legend>Espace utilisé</legend>
+				<div className="storage-gauge" role="meter" aria-valuenow={usedPct} aria-valuemin={0} aria-valuemax={100} aria-label="Espace de stockage utilisé">
+					<div className={`storage-gauge-fill ${usedPct >= 80 ? 'storage-gauge-high' : ''}`} style={{ width: `${usedPct}%` }} />
+				</div>
+				<p className="doc-count">
+					{(used / 1e6).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} Mo utilisés sur environ 5 Mo ({usedPct} %).
+					{usedPct >= 80 && ' Attention : au-delà de la limite, les saisies ne sont plus enregistrées.'}
+				</p>
+			</fieldset>
 
 			<fieldset className="doc-panel">
 				<legend>Sauvegarder</legend>

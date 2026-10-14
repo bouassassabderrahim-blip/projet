@@ -7,7 +7,7 @@ import PaymentDialog from './PaymentDialog'
 import ReminderPrint from './ReminderPrint'
 import { downloadCsv, journal } from './csv'
 import { balanceOf, isActive, isOverdue, paidAmount, sign } from './ledger'
-import { addDays, frDate, newDocument, newId, nextNumber, today } from './numbering'
+import { addDays, finalNumber, frDate, newDocument, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
 	DOC_LABELS,
@@ -39,7 +39,8 @@ interface Props {
 	openId?: string
 	onNavigate?: (kind: DocKind, openId?: string) => void
 	/** Mouvement de stock : -1 sortie, +1 entrée */
-	onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
+	/** Renvoie la quantité réellement déplacée par ligne */
+	onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => Record<string, number> | void
 }
 
 type View =
@@ -174,27 +175,48 @@ export default function DocumentsPage({
 	}
 
 	function setStatus(doc: CommercialDocument, status: DocStatus) {
+		// Validation : numéro définitif, à la suite des pièces déjà validées (aucun trou possible)
+		const number = status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number
 		let next = documents.map((d) =>
-			d.id === doc.id ? { ...d, status, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
+			d.id === doc.id ? { ...d, status, number, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
 		)
-		access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
+		// Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
+		const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
+		if (clash) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
+		if (number !== doc.number) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
+		access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${number} · ${doc.party.name}`)
 		const supplier = doc.party.name
 
 		if (status === 'validated') {
 			if (doc.kind === 'delivery') {
-				onStockMove?.(doc.lines, -1, '', doc.number)
+				const moved = onStockMove?.(doc.lines, -1, '', number) ?? {}
+				// On retient la quantité réellement sortie (pour une annulation exacte) ;
 				// BL en dépôt : chaque ligne reste à facturer à la pose
-				if (doc.consignment)
-					next = next.map((d) =>
-						d.id === doc.id ? { ...d, lines: d.lines.map((l) => ({ ...l, depot: l.depot ?? 'depot' })) } : d,
-					)
+				next = next.map((d) =>
+					d.id === doc.id
+						? {
+								...d,
+								lines: d.lines.map((l) => ({
+									...l,
+									movedQty: moved[l.id] ?? l.quantity,
+									depot: doc.consignment ? (l.depot ?? 'depot') : l.depot,
+								})),
+							}
+						: d,
+				)
 			}
-			if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, doc.number)
-			if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', doc.number)
+			if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, number)
+			if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', number)
 		}
 
 		if (status === 'cancelled' && doc.status !== 'draft') {
-			if (doc.kind === 'delivery') onStockMove?.(doc.lines.filter((l) => l.depot !== 'returned'), 1, '', `Annulation ${doc.number}`)
+			if (doc.kind === 'delivery')
+				onStockMove?.(
+					doc.lines.filter((l) => l.depot !== 'returned').map((l) => ({ ...l, quantity: l.movedQty ?? l.quantity })),
+					1,
+					'',
+					`Annulation ${doc.number}`,
+				)
 			if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1, '', `Annulation ${doc.number}`)
 		}
 		onChange(next)
@@ -233,7 +255,7 @@ export default function DocumentsPage({
 	}
 
 	function copyLines(lines: DocLine[]): DocLine[] {
-		return lines.map((l) => ({ ...l, id: newId(), depot: undefined, depotRef: undefined }))
+		return lines.map((l) => ({ ...l, id: newId(), depot: undefined, depotRef: undefined, movedQty: undefined }))
 	}
 
 	function duplicate(doc: CommercialDocument) {

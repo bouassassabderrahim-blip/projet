@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { isActive, sign } from './ledger'
+import { today } from './numbering'
 import { computeTotals, formatMAD, lineHT, round2 } from './tva'
 import type { CommercialDocument } from './types'
 import './documents.css'
@@ -136,7 +137,7 @@ export default function StatsPage({ documents, products }: Props) {
 		let previous = 0
 		const thisYear = String(year)
 		const lastYear = String(year - 1)
-		const sameDay = new Date().toISOString().slice(4, 10)
+		const sameDay = today().slice(4)
 
 		for (const d of documents) {
 			if ((d.kind !== 'invoice' && d.kind !== 'credit') || !isActive(d)) continue

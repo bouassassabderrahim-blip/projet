@@ -507,3 +507,8 @@
 .stats-inline-bar { height: 10px; background: #2a78d6; border-radius: 0 4px 4px 0; min-width: 2px; }
 .doc-stats small { font-size: 11.5px; }
 .doc-cash-input { font-size: 16px !important; font-weight: 700; width: 100%; }
+
+/* ---------- Espace de stockage ---------- */
+.storage-gauge { height: 10px; background: #e5eaf0; border-radius: 5px; overflow: hidden; }
+.storage-gauge-fill { height: 100%; background: #2a78d6; }
+.storage-gauge-high { background: #dc2626; }

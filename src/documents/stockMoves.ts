@@ -1,6 +1,6 @@
 // Mouvements de stock déclenchés par les BL, les réceptions et les retours de dépôt
 import type { Product } from '../types'
-import { newId, today } from './numbering'
+import { isoDate, newId, today } from './numbering'
 import type { DocLine, StockLot, StockMovement } from './types'
 
 export interface StockState {
@@ -13,6 +13,8 @@ export interface MoveResult extends StockState {
 	shortages: string[]
 	/** Lignes du journal des mouvements */
 	movements: StockMovement[]
+	/** Quantité réellement déplacée, par ligne de pièce */
+	moved: Record<string, number>
 }
 
 /**
@@ -30,6 +32,7 @@ export function applyMove(
 	const lots = state.lots.map((l) => ({ ...l }))
 	const shortages: string[] = []
 	const movements: StockMovement[] = []
+	const moved: Record<string, number> = {}
 
 	for (const line of lines) {
 		if (!line.productId || line.quantity <= 0) continue
@@ -42,6 +45,8 @@ export function applyMove(
 				if (direction > 0) product.stock = line.quantity
 			} else {
 				if (product.stock + q < 0) shortages.push(`${product.name} (stock ${product.stock}, sortie ${line.quantity})`)
+				// Une sortie ne peut pas dépasser le stock : on retient ce qui est réellement sorti
+				moved[line.id] = direction < 0 ? Math.min(product.stock, line.quantity) : line.quantity
 				product.stock = Math.max(0, product.stock + q)
 			}
 		}
@@ -80,14 +85,14 @@ export function applyMove(
 			productName: product?.name ?? line.description,
 			lot: line.lot ?? '',
 			serial: line.serial ?? '',
-			quantity: q,
+			quantity: moved[line.id] !== undefined ? moved[line.id] * direction : q,
 			kind: direction > 0 ? 'in' : 'out',
 			reference,
 			stockAfter: product?.stock,
 		})
 	}
 
-	return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages, movements }
+	return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages, movements, moved }
 }
 
 export type ExpiryState = 'expired' | 'soon' | 'ok' | 'none'
@@ -98,7 +103,7 @@ export function expiryState(expiry: string, now = today(), soonDays = 90): Expir
 	if (expiry < now) return 'expired'
 	const limit = new Date(now + 'T00:00:00')
 	limit.setDate(limit.getDate() + soonDays)
-	return expiry <= limit.toISOString().slice(0, 10) ? 'soon' : 'ok'
+	return expiry <= isoDate(limit) ? 'soon' : 'ok'
 }
 
 /** Lots disponibles d'un produit, du plus proche de la péremption au plus lointain (FEFO) */

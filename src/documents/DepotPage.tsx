@@ -9,7 +9,7 @@ interface Props {
 	documents: CommercialDocument[]
 	onChange: (docs: CommercialDocument[]) => void
 	onNavigate: (kind: DocKind, openId?: string) => void
-	onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
+	onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => Record<string, number> | void
 }
 
 interface DepotItem {
@@ -80,7 +80,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 		if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
 		onChange(setDepot(documents, [item], 'returned'))
 		access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
-		onStockMove([item.line], 1, '', `Retour dépôt ${item.bl.number}`)
+		onStockMove([{ ...item.line, quantity: item.line.movedQty ?? item.line.quantity }], 1, '', `Retour dépôt ${item.bl.number}`)
 	}
 
 	const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))

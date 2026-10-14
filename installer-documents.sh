@@ -11,11 +11,12 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 
 
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { useAccess } from '../access/context'
 import { downloadFile } from './csv'
-import { LAST_BACKUP_KEY, createBackup, isBackupFile, restoreBackup } from './storage'
+import { LAST_BACKUP_KEY, STORAGE_LIMIT, createBackup, isBackupFile, restoreBackup, storageUsage } from './storage'
 import { daysBetween, frDate, today } from './numbering'
 import './documents.css'
 
@@ -34,6 +35,8 @@ export default function BackupPage() {
   const [error, setError] = useState('')
   const access = useAccess()
   const age = last ? daysBetween(last, today()) : null
+  const used = storageUsage()
+  const usedPct = Math.min(100, Math.round((used / STORAGE_LIMIT) * 100))
 
   function exportAll() {
     const backup = createBackup()
@@ -75,6 +78,17 @@ export default function BackupPage() {
         Vos données sont enregistrées uniquement dans ce navigateur : vider le cache ou changer d'ordinateur les fait
         perdre. Sauvegardez au moins une fois par semaine et gardez le fichier en lieu sûr (clé USB, Google Drive…).
       </div>
+
+      <fieldset className="doc-panel">
+        <legend>Espace utilisé</legend>
+        <div className="storage-gauge" role="meter" aria-valuenow={usedPct} aria-valuemin={0} aria-valuemax={100} aria-label="Espace de stockage utilisé">
+          <div className={`storage-gauge-fill ${usedPct >= 80 ? 'storage-gauge-high' : ''}`} style={{ width: `${usedPct}%` }} />
+        </div>
+        <p className="doc-count">
+          {(used / 1e6).toLocaleString('fr-FR', { maximumFractionDigits: 2 })} Mo utilisés sur environ 5 Mo ({usedPct} %).
+          {usedPct >= 80 && ' Attention : au-delà de la limite, les saisies ne sont plus enregistrées.'}
+        </p>
+      </fieldset>
 
       <fieldset className="doc-panel">
         <legend>Sauvegarder</legend>
@@ -379,7 +393,7 @@ interface Props {
   documents: CommercialDocument[]
   onChange: (docs: CommercialDocument[]) => void
   onNavigate: (kind: DocKind, openId?: string) => void
-  onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
+  onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => Record<string, number> | void
 }
 
 interface DepotItem {
@@ -450,7 +464,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
     if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
     onChange(setDepot(documents, [item], 'returned'))
     access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
-    onStockMove([item.line], 1, '', `Retour dépôt ${item.bl.number}`)
+    onStockMove([{ ...item.line, quantity: item.line.movedQty ?? item.line.quantity }], 1, '', `Retour dépôt ${item.bl.number}`)
   }
 
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
@@ -1307,7 +1321,7 @@ import PaymentDialog from './PaymentDialog'
 import ReminderPrint from './ReminderPrint'
 import { downloadCsv, journal } from './csv'
 import { balanceOf, isActive, isOverdue, paidAmount, sign } from './ledger'
-import { addDays, frDate, newDocument, newId, nextNumber, today } from './numbering'
+import { addDays, finalNumber, frDate, newDocument, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
 import {
   DOC_LABELS,
@@ -1339,7 +1353,8 @@ interface Props {
   openId?: string
   onNavigate?: (kind: DocKind, openId?: string) => void
   /** Mouvement de stock : -1 sortie, +1 entrée */
-  onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => void
+  /** Renvoie la quantité réellement déplacée par ligne */
+  onStockMove?: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => Record<string, number> | void
 }
 
 type View =
@@ -1474,27 +1489,48 @@ export default function DocumentsPage({
   }
 
   function setStatus(doc: CommercialDocument, status: DocStatus) {
+    // Validation : numéro définitif, à la suite des pièces déjà validées (aucun trou possible)
+    const number = status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number
     let next = documents.map((d) =>
-      d.id === doc.id ? { ...d, status, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
+      d.id === doc.id ? { ...d, status, number, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
     )
-    access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
+    // Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
+    const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
+    if (clash) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
+    if (number !== doc.number) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
+    access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${number} · ${doc.party.name}`)
     const supplier = doc.party.name
 
     if (status === 'validated') {
       if (doc.kind === 'delivery') {
-        onStockMove?.(doc.lines, -1, '', doc.number)
+        const moved = onStockMove?.(doc.lines, -1, '', number) ?? {}
+        // On retient la quantité réellement sortie (pour une annulation exacte) ;
         // BL en dépôt : chaque ligne reste à facturer à la pose
-        if (doc.consignment)
-          next = next.map((d) =>
-            d.id === doc.id ? { ...d, lines: d.lines.map((l) => ({ ...l, depot: l.depot ?? 'depot' })) } : d,
-          )
+        next = next.map((d) =>
+          d.id === doc.id
+            ? {
+                ...d,
+                lines: d.lines.map((l) => ({
+                  ...l,
+                  movedQty: moved[l.id] ?? l.quantity,
+                  depot: doc.consignment ? (l.depot ?? 'depot') : l.depot,
+                })),
+              }
+            : d,
+        )
       }
-      if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, doc.number)
-      if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', doc.number)
+      if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, number)
+      if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', number)
     }
 
     if (status === 'cancelled' && doc.status !== 'draft') {
-      if (doc.kind === 'delivery') onStockMove?.(doc.lines.filter((l) => l.depot !== 'returned'), 1, '', `Annulation ${doc.number}`)
+      if (doc.kind === 'delivery')
+        onStockMove?.(
+          doc.lines.filter((l) => l.depot !== 'returned').map((l) => ({ ...l, quantity: l.movedQty ?? l.quantity })),
+          1,
+          '',
+          `Annulation ${doc.number}`,
+        )
       if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1, '', `Annulation ${doc.number}`)
     }
     onChange(next)
@@ -1533,7 +1569,7 @@ export default function DocumentsPage({
   }
 
   function copyLines(lines: DocLine[]): DocLine[] {
-    return lines.map((l) => ({ ...l, id: newId(), depot: undefined, depotRef: undefined }))
+    return lines.map((l) => ({ ...l, id: newId(), depot: undefined, depotRef: undefined, movedQty: undefined }))
   }
 
   function duplicate(doc: CommercialDocument) {
@@ -3259,6 +3295,7 @@ import { useMemo, useState } from 'react'
 import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { isActive, sign } from './ledger'
+import { today } from './numbering'
 import { computeTotals, formatMAD, lineHT, round2 } from './tva'
 import type { CommercialDocument } from './types'
 import './documents.css'
@@ -3393,7 +3430,7 @@ export default function StatsPage({ documents, products }: Props) {
     let previous = 0
     const thisYear = String(year)
     const lastYear = String(year - 1)
-    const sameDay = new Date().toISOString().slice(4, 10)
+    const sameDay = today().slice(4)
 
     for (const d of documents) {
       if ((d.kind !== 'invoice' && d.kind !== 'credit') || !isActive(d)) continue
@@ -4816,6 +4853,11 @@ cat > src/documents/documents.css <<'FIN_DU_FICHIER'
 .stats-inline-bar { height: 10px; background: #2a78d6; border-radius: 0 4px 4px 0; min-width: 2px; }
 .doc-stats small { font-size: 11.5px; }
 .doc-cash-input { font-size: 16px !important; font-weight: 700; width: 100%; }
+
+/* ---------- Espace de stockage ---------- */
+.storage-gauge { height: 10px; background: #e5eaf0; border-radius: 5px; overflow: hidden; }
+.storage-gauge-fill { height: 100%; background: #2a78d6; }
+.storage-gauge-high { background: #dc2626; }
 FIN_DU_FICHIER
 echo "OK src/documents/documents.css"
 
@@ -4894,14 +4936,19 @@ export function newId(): string {
     : Date.now().toString(36) + Math.random().toString(36).slice(2)
 }
 
+/** Date locale au format AAAA-MM-JJ (et non UTC : au Maroc, toISOString décale d'un jour entre minuit et 1 h) */
+export function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export function today(): string {
-  return new Date().toISOString().slice(0, 10)
+  return isoDate(new Date())
 }
 
 export function addDays(date: string, days: number): string {
   const d = new Date(date + 'T00:00:00')
   d.setDate(d.getDate() + days)
-  return d.toISOString().slice(0, 10)
+  return isoDate(d)
 }
 
 export function daysBetween(from: string, to: string): number {
@@ -4932,6 +4979,14 @@ export function newDocument(kind: DocKind, docs: CommercialDocument[]): Commerci
     paymentMethod: 'virement',
     notes: '',
   }
+}
+
+/**
+ * Numéro définitif attribué à la validation : il suit les pièces déjà validées du même type et de la
+ * même année, si bien que la suppression d'un brouillon ne laisse jamais de trou dans la numérotation.
+ */
+export function finalNumber(doc: CommercialDocument, docs: CommercialDocument[]): string {
+  return nextNumber(doc.kind, docs.filter((d) => d.status !== 'draft' && d.id !== doc.id), doc.date)
 }
 FIN_DU_FICHIER
 echo "OK src/documents/numbering.ts"
@@ -4979,7 +5034,7 @@ echo "OK src/documents/printSettings.ts"
 cat > src/documents/stockMoves.ts <<'FIN_DU_FICHIER'
 // Mouvements de stock déclenchés par les BL, les réceptions et les retours de dépôt
 import type { Product } from '../types'
-import { newId, today } from './numbering'
+import { isoDate, newId, today } from './numbering'
 import type { DocLine, StockLot, StockMovement } from './types'
 
 export interface StockState {
@@ -4992,6 +5047,8 @@ export interface MoveResult extends StockState {
   shortages: string[]
   /** Lignes du journal des mouvements */
   movements: StockMovement[]
+  /** Quantité réellement déplacée, par ligne de pièce */
+  moved: Record<string, number>
 }
 
 /**
@@ -5009,6 +5066,7 @@ export function applyMove(
   const lots = state.lots.map((l) => ({ ...l }))
   const shortages: string[] = []
   const movements: StockMovement[] = []
+  const moved: Record<string, number> = {}
 
   for (const line of lines) {
     if (!line.productId || line.quantity <= 0) continue
@@ -5021,6 +5079,8 @@ export function applyMove(
         if (direction > 0) product.stock = line.quantity
       } else {
         if (product.stock + q < 0) shortages.push(`${product.name} (stock ${product.stock}, sortie ${line.quantity})`)
+        // Une sortie ne peut pas dépasser le stock : on retient ce qui est réellement sorti
+        moved[line.id] = direction < 0 ? Math.min(product.stock, line.quantity) : line.quantity
         product.stock = Math.max(0, product.stock + q)
       }
     }
@@ -5059,14 +5119,14 @@ export function applyMove(
       productName: product?.name ?? line.description,
       lot: line.lot ?? '',
       serial: line.serial ?? '',
-      quantity: q,
+      quantity: moved[line.id] !== undefined ? moved[line.id] * direction : q,
       kind: direction > 0 ? 'in' : 'out',
       reference,
       stockAfter: product?.stock,
     })
   }
 
-  return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages, movements }
+  return { products: state.products.map((p) => products.get(p.id) ?? p), lots, shortages, movements, moved }
 }
 
 export type ExpiryState = 'expired' | 'soon' | 'ok' | 'none'
@@ -5077,7 +5137,7 @@ export function expiryState(expiry: string, now = today(), soonDays = 90): Expir
   if (expiry < now) return 'expired'
   const limit = new Date(now + 'T00:00:00')
   limit.setDate(limit.getDate() + soonDays)
-  return expiry <= limit.toISOString().slice(0, 10) ? 'soon' : 'ok'
+  return expiry <= isoDate(limit) ? 'soon' : 'ok'
 }
 
 /** Lots disponibles d'un produit, du plus proche de la péremption au plus lointain (FEFO) */
@@ -5111,7 +5171,14 @@ export const MOVES_KEY = 'profitpilot:movements:v1'
 export const CASH_KEY = 'profitpilot:cash:v1'
 export const LAST_BACKUP_KEY = 'profitpilot:last-backup'
 
-/** État React sauvegardé dans le localStorage, avec validation à la relecture */
+/** Événement émis quand le navigateur refuse d'enregistrer (stockage plein) */
+export const STORAGE_ERROR_EVENT = 'profitpilot:storage-error'
+
+/**
+ * État React sauvegardé dans le localStorage, avec validation à la relecture.
+ * Les autres onglets ouverts sont tenus à jour (événement « storage ») pour ne jamais
+ * écraser une saisie faite ailleurs ; un échec d'enregistrement est signalé à l'application.
+ */
 export function usePersistentState<T>(key: string, fallback: () => T, isValid: (x: unknown) => x is T) {
   const [value, setValue] = useState<T>(() => {
     try {
@@ -5128,14 +5195,49 @@ export function usePersistentState<T>(key: string, fallback: () => T, isValid: (
 
   useEffect(() => {
     try {
-      localStorage.setItem(key, JSON.stringify(value))
+      const raw = JSON.stringify(value)
+      // Pas de réécriture si la valeur vient d'un autre onglet
+      if (localStorage.getItem(key) !== raw) localStorage.setItem(key, raw)
     } catch {
-      // stockage indisponible : on continue sans sauvegarde
+      window.dispatchEvent(new CustomEvent(STORAGE_ERROR_EVENT, { detail: key }))
     }
   }, [key, value])
 
+  useEffect(() => {
+    function onStorage(e: StorageEvent) {
+      if (e.key !== key || e.newValue === null) return
+      try {
+        const data: unknown = JSON.parse(e.newValue)
+        if (isValid(data)) setValue(data)
+      } catch {
+        // valeur illisible : on garde l'état courant
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+    // isValid est une fonction stable définie au niveau du module
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key])
+
   return [value, setValue] as const
 }
+
+/** Place occupée par les données de l'application (en caractères, ~ octets) */
+export function storageUsage(): number {
+  let size = 0
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k?.startsWith('profitpilot:')) size += k.length + (localStorage.getItem(k) ?? '').length
+    }
+  } catch {
+    // stockage indisponible
+  }
+  return size
+}
+
+/** Limite courante des navigateurs pour le localStorage (≈ 5 millions de caractères) */
+export const STORAGE_LIMIT = 5_000_000
 
 const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null
 
@@ -5451,6 +5553,8 @@ export interface DocLine {
   lot?: string
   serial?: string
   expiry?: string // AAAA-MM-JJ
+  /** Quantité réellement sortie du stock à la validation (peut être inférieure si stock insuffisant) */
+  movedQty?: number
   /** Lignes de BL en dépôt */
   depot?: DepotState
   /** Ligne de BL dépôt facturée par cette ligne (pour la remettre en dépôt si la facture est supprimée) */
@@ -8217,7 +8321,7 @@ import StatusBar from './shell/StatusBar'
 import GlobalSearch, { type SearchHit } from './shell/GlobalSearch'
 import Launchpad from './shell/Launchpad'
 import { ADMIN_PAGES, MODULES, moduleOf, type ModuleId } from './shell/navigation'
-import { LAST_BACKUP_KEY } from './documents/storage'
+import { LAST_BACKUP_KEY, STORAGE_ERROR_EVENT } from './documents/storage'
 import { AccessContext, accessFor } from './access/context'
 import { readSession, useAccessSettings, useAudit, useUsers, writeSession } from './access/storage'
 import type { AuditEntry, User } from './access/types'
@@ -8459,11 +8563,33 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ products, isSampleData }))
+      const raw = JSON.stringify({ products, isSampleData })
+      if (localStorage.getItem(STORAGE_KEY) !== raw) localStorage.setItem(STORAGE_KEY, raw)
     } catch {
-      // stockage indisponible : on continue sans sauvegarde
+      window.dispatchEvent(new CustomEvent(STORAGE_ERROR_EVENT, { detail: STORAGE_KEY }))
     }
   }, [products, isSampleData])
+
+  // Stockage plein : on prévient au lieu de perdre les saisies en silence
+  const [storageFull, setStorageFull] = useState(false)
+  useEffect(() => {
+    const onError = () => setStorageFull(true)
+    // Articles modifiés dans un autre onglet : on reprend leur version
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== STORAGE_KEY || !e.newValue) return
+      const saved = loadSaved()
+      if (saved) {
+        setProducts(saved.products)
+        setIsSampleData(saved.isSampleData)
+      }
+    }
+    window.addEventListener(STORAGE_ERROR_EVENT, onError)
+    window.addEventListener('storage', onStorage)
+    return () => {
+      window.removeEventListener(STORAGE_ERROR_EVENT, onError)
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [])
 
   useEffect(() => {
     try {
@@ -8544,12 +8670,13 @@ export default function App() {
   }
 
   // BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
-  function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) {
+  function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string): Record<string, number> {
     const result = applyMove({ products, lots }, lines, direction, supplier, reference)
     handleEdit(result.products)
     setLots(result.lots)
     addMovements(result.movements)
     if (result.shortages.length) alert('Stock insuffisant, ramené à 0 pour :\n' + result.shortages.join('\n'))
+    return result.moved
   }
 
   function addMovements(added: StockMovement[]) {
@@ -8693,6 +8820,18 @@ export default function App() {
           ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
           {isSampleData ? ' · données de démonstration' : ''}
         </p>
+        {storageFull && (
+          <div className="stock-alert-banner no-print">
+            <span>
+              <strong>Espace de stockage plein :</strong> vos dernières modifications n'ont pas pu être enregistrées.
+              Téléchargez une sauvegarde tout de suite, puis allégez les images (logo, papier à en-tête) ou le
+              journal d'activité.
+            </span>
+            <button type="button" onClick={() => navigate('backup')}>
+              Sauvegarde
+            </button>
+          </div>
+        )}
         {page !== 'home' && <h1>{titles[page]}</h1>}
         {stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && access.level('stock') !== 'none' && (
           <div className="stock-alert-banner no-print">

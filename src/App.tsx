@@ -39,7 +39,7 @@ import StatusBar from './shell/StatusBar'
 import GlobalSearch, { type SearchHit } from './shell/GlobalSearch'
 import Launchpad from './shell/Launchpad'
 import { ADMIN_PAGES, MODULES, moduleOf, type ModuleId } from './shell/navigation'
-import { LAST_BACKUP_KEY } from './documents/storage'
+import { LAST_BACKUP_KEY, STORAGE_ERROR_EVENT } from './documents/storage'
 import { AccessContext, accessFor } from './access/context'
 import { readSession, useAccessSettings, useAudit, useUsers, writeSession } from './access/storage'
 import type { AuditEntry, User } from './access/types'
@@ -281,11 +281,33 @@ export default function App() {
 
 	useEffect(() => {
 		try {
-			localStorage.setItem(STORAGE_KEY, JSON.stringify({ products, isSampleData }))
+			const raw = JSON.stringify({ products, isSampleData })
+			if (localStorage.getItem(STORAGE_KEY) !== raw) localStorage.setItem(STORAGE_KEY, raw)
 		} catch {
-			// stockage indisponible : on continue sans sauvegarde
+			window.dispatchEvent(new CustomEvent(STORAGE_ERROR_EVENT, { detail: STORAGE_KEY }))
 		}
 	}, [products, isSampleData])
+
+	// Stockage plein : on prévient au lieu de perdre les saisies en silence
+	const [storageFull, setStorageFull] = useState(false)
+	useEffect(() => {
+		const onError = () => setStorageFull(true)
+		// Articles modifiés dans un autre onglet : on reprend leur version
+		const onStorage = (e: StorageEvent) => {
+			if (e.key !== STORAGE_KEY || !e.newValue) return
+			const saved = loadSaved()
+			if (saved) {
+				setProducts(saved.products)
+				setIsSampleData(saved.isSampleData)
+			}
+		}
+		window.addEventListener(STORAGE_ERROR_EVENT, onError)
+		window.addEventListener('storage', onStorage)
+		return () => {
+			window.removeEventListener(STORAGE_ERROR_EVENT, onError)
+			window.removeEventListener('storage', onStorage)
+		}
+	}, [])
 
 	useEffect(() => {
 		try {
@@ -366,12 +388,13 @@ export default function App() {
 	}
 
 	// BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
-	function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) {
+	function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string): Record<string, number> {
 		const result = applyMove({ products, lots }, lines, direction, supplier, reference)
 		handleEdit(result.products)
 		setLots(result.lots)
 		addMovements(result.movements)
 		if (result.shortages.length) alert('Stock insuffisant, ramené à 0 pour :\n' + result.shortages.join('\n'))
+		return result.moved
 	}
 
 	function addMovements(added: StockMovement[]) {
@@ -515,6 +538,18 @@ export default function App() {
 					ProfitPilot · {titles[page]} · {new Date().toLocaleDateString('fr-FR')} · {currency}
 					{isSampleData ? ' · données de démonstration' : ''}
 				</p>
+				{storageFull && (
+					<div className="stock-alert-banner no-print">
+						<span>
+							<strong>Espace de stockage plein :</strong> vos dernières modifications n'ont pas pu être enregistrées.
+							Téléchargez une sauvegarde tout de suite, puis allégez les images (logo, papier à en-tête) ou le
+							journal d'activité.
+						</span>
+						<button type="button" onClick={() => navigate('backup')}>
+							Sauvegarde
+						</button>
+					</div>
+				)}
 				{page !== 'home' && <h1>{titles[page]}</h1>}
 				{stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && access.level('stock') !== 'none' && (
 					<div className="stock-alert-banner no-print">

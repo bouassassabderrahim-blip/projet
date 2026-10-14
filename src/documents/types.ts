@@ -106,6 +106,8 @@ export interface DocLine {
 	lot?: string
 	serial?: string
 	expiry?: string // AAAA-MM-JJ
+	/** Quantité réellement sortie du stock à la validation (peut être inférieure si stock insuffisant) */
+	movedQty?: number
 	/** Lignes de BL en dépôt */
 	depot?: DepotState
 	/** Ligne de BL dépôt facturée par cette ligne (pour la remettre en dépôt si la facture est supprimée) */

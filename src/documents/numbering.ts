@@ -19,14 +19,19 @@ export function newId(): string {
 		: Date.now().toString(36) + Math.random().toString(36).slice(2)
 }
 
+/** Date locale au format AAAA-MM-JJ (et non UTC : au Maroc, toISOString décale d'un jour entre minuit et 1 h) */
+export function isoDate(d: Date): string {
+	return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 export function today(): string {
-	return new Date().toISOString().slice(0, 10)
+	return isoDate(new Date())
 }
 
 export function addDays(date: string, days: number): string {
 	const d = new Date(date + 'T00:00:00')
 	d.setDate(d.getDate() + days)
-	return d.toISOString().slice(0, 10)
+	return isoDate(d)
 }
 
 export function daysBetween(from: string, to: string): number {
@@ -57,4 +62,12 @@ export function newDocument(kind: DocKind, docs: CommercialDocument[]): Commerci
 		paymentMethod: 'virement',
 		notes: '',
 	}
+}
+
+/**
+ * Numéro définitif attribué à la validation : il suit les pièces déjà validées du même type et de la
+ * même année, si bien que la suppression d'un brouillon ne laisse jamais de trou dans la numérotation.
+ */
+export function finalNumber(doc: CommercialDocument, docs: CommercialDocument[]): string {
+	return nextNumber(doc.kind, docs.filter((d) => d.status !== 'draft' && d.id !== doc.id), doc.date)
 }
