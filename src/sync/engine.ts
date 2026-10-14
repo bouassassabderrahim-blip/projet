@@ -64,17 +64,46 @@ export class SyncEngine {
 		for (const fn of this.listeners) fn(this.status)
 	}
 
+	private releaseLock: (() => void) | null = null
+	private stopped = false
+
+	/**
+	 * Démarre la synchro automatique. Plusieurs onglets ouverts sur le même poste : un seul synchronise
+	 * (verrou du navigateur) ; si on le ferme, un autre onglet prend aussitôt le relais.
+	 */
 	start() {
-		if (this.timer !== null) return
+		this.stopped = false
+		this.setStatus({ phase: 'idle', message: 'Synchronisé par un autre onglet ouvert sur ce poste' })
+		const locks = (navigator as Navigator & { locks?: LockManager }).locks
+		if (!locks) return this.beginLoop()
+		void locks.request(`profitpilot-sync:${this.dossier}`, () => {
+			if (this.stopped) return
+			this.beginLoop()
+			return new Promise<void>((resolve) => {
+				this.releaseLock = resolve
+			})
+		})
+	}
+
+	private beginLoop() {
+		if (this.timer !== null || this.stopped) return
 		void this.syncNow()
 		this.timer = window.setInterval(() => void this.syncNow(), INTERVAL_MS)
 		window.addEventListener('online', this.onOnline)
 	}
 
 	stop() {
+		this.stopped = true
 		if (this.timer !== null) window.clearInterval(this.timer)
 		this.timer = null
 		window.removeEventListener('online', this.onOnline)
+		this.releaseLock?.()
+		this.releaseLock = null
+	}
+
+	/** Cet onglet est-il celui qui synchronise ? */
+	get active(): boolean {
+		return this.timer !== null
 	}
 
 	private onOnline = () => void this.syncNow()

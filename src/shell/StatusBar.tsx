@@ -15,6 +15,7 @@ function syncLabel(s: SyncStatus): { text: string; tone: string } {
 	if (s.phase === 'auth') return { text: 'Multi-postes : reconnexion nécessaire', tone: 'erp-status-error' }
 	if (s.phase === 'error') return { text: 'Multi-postes : erreur de synchronisation', tone: 'erp-status-error' }
 	if (s.phase === 'ok' && s.lastSync) return { text: `Synchronisé à ${new Date(s.lastSync).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, tone: 'erp-status-ok' }
+	if (s.phase === 'idle' && s.message) return { text: s.message, tone: 'erp-status-ok' }
 	return { text: 'Synchronisation…', tone: '' }
 }
 

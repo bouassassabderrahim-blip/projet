@@ -26,6 +26,7 @@ export class RemoteError extends Error {}
 
 const PAGE = 1000
 const PUSH_CHUNK = 200
+const PUSH_BYTES = 400_000
 
 async function send(input: string, init: RequestInit): Promise<Response> {
 	try {
@@ -68,6 +69,8 @@ export class SupabaseRemote {
 	private readonly dossier: string
 	/** Appelé quand le jeton de rafraîchissement change (à enregistrer) */
 	onSession?: (s: Session) => void
+	/** Dernier jeton de rafraîchissement enregistré (un autre onglet a pu le renouveler entre-temps) */
+	latestRefreshToken?: () => string | undefined
 
 	constructor(url: string, anonKey: string, dossier: string, refreshToken?: string, email = '') {
 		this.url = url
@@ -92,11 +95,20 @@ export class SupabaseRemote {
 	private async refresh(): Promise<Session> {
 		const current = this.session
 		if (!current?.refreshToken) throw new AuthError('Session absente')
-		const res = await send(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
-			method: 'POST',
-			headers: { apikey: this.anonKey, 'Content-Type': 'application/json' },
-			body: JSON.stringify({ refresh_token: current.refreshToken }),
-		})
+		// Supabase n'accepte qu'une fois chaque jeton : on part toujours du plus récent enregistré
+		const token = this.latestRefreshToken?.() || current.refreshToken
+		const call = (refresh_token: string) =>
+			send(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
+				method: 'POST',
+				headers: { apikey: this.anonKey, 'Content-Type': 'application/json' },
+				body: JSON.stringify({ refresh_token }),
+			})
+		let res = await call(token)
+		if (!res.ok && res.status < 500) {
+			// Renouvelé par un autre onglet pendant l'appel : on réessaie avec le jeton enregistré par celui-ci
+			const latest = this.latestRefreshToken?.()
+			if (latest && latest !== token) res = await call(latest)
+		}
 		if (!res.ok) {
 			if (res.status >= 500) throw new RemoteError(await errorText(res))
 			throw new AuthError(await errorText(res))
@@ -160,22 +172,27 @@ export class SupabaseRemote {
 		}
 	}
 
-	/** Envoi (insertion ou mise à jour) par paquets */
+	/** Envoi (insertion ou mise à jour) par paquets d'au plus 200 lignes et ~400 Ko (images du papier à en-tête) */
 	async push(rows: RemoteRow[]): Promise<void> {
-		for (let i = 0; i < rows.length; i += PUSH_CHUNK) {
-			const chunk = rows.slice(i, i + PUSH_CHUNK).map((r) => ({
-				dossier: this.dossier,
-				collection: r.collection,
-				id: r.id,
-				data: r.data,
-				deleted: r.deleted,
-			}))
+		let chunk: string[] = []
+		let size = 0
+		const flush = async () => {
+			if (!chunk.length) return
 			await this.rest('records', {
 				method: 'POST',
 				headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-				body: JSON.stringify(chunk),
+				body: '[' + chunk.join(',') + ']',
 			})
+			chunk = []
+			size = 0
 		}
+		for (const r of rows) {
+			const json = JSON.stringify({ dossier: this.dossier, collection: r.collection, id: r.id, data: r.data, deleted: r.deleted })
+			if (chunk.length && (chunk.length >= PUSH_CHUNK || size + json.length > PUSH_BYTES)) await flush()
+			chunk.push(json)
+			size += json.length
+		}
+		await flush()
 	}
 
 	/** Le compte connecté figure-t-il dans la liste des membres du dossier ? */

@@ -13,6 +13,7 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 
 
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { useAccess } from '../access/context'
@@ -6196,6 +6197,7 @@ function syncLabel(s: SyncStatus): { text: string; tone: string } {
   if (s.phase === 'auth') return { text: 'Multi-postes : reconnexion nécessaire', tone: 'erp-status-error' }
   if (s.phase === 'error') return { text: 'Multi-postes : erreur de synchronisation', tone: 'erp-status-error' }
   if (s.phase === 'ok' && s.lastSync) return { text: `Synchronisé à ${new Date(s.lastSync).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, tone: 'erp-status-ok' }
+  if (s.phase === 'idle' && s.message) return { text: s.message, tone: 'erp-status-ok' }
   return { text: 'Synchronisation…', tone: '' }
 }
 
@@ -8506,17 +8508,46 @@ export class SyncEngine {
     for (const fn of this.listeners) fn(this.status)
   }
 
+  private releaseLock: (() => void) | null = null
+  private stopped = false
+
+  /**
+   * Démarre la synchro automatique. Plusieurs onglets ouverts sur le même poste : un seul synchronise
+   * (verrou du navigateur) ; si on le ferme, un autre onglet prend aussitôt le relais.
+   */
   start() {
-    if (this.timer !== null) return
+    this.stopped = false
+    this.setStatus({ phase: 'idle', message: 'Synchronisé par un autre onglet ouvert sur ce poste' })
+    const locks = (navigator as Navigator & { locks?: LockManager }).locks
+    if (!locks) return this.beginLoop()
+    void locks.request(`profitpilot-sync:${this.dossier}`, () => {
+      if (this.stopped) return
+      this.beginLoop()
+      return new Promise<void>((resolve) => {
+        this.releaseLock = resolve
+      })
+    })
+  }
+
+  private beginLoop() {
+    if (this.timer !== null || this.stopped) return
     void this.syncNow()
     this.timer = window.setInterval(() => void this.syncNow(), INTERVAL_MS)
     window.addEventListener('online', this.onOnline)
   }
 
   stop() {
+    this.stopped = true
     if (this.timer !== null) window.clearInterval(this.timer)
     this.timer = null
     window.removeEventListener('online', this.onOnline)
+    this.releaseLock?.()
+    this.releaseLock = null
+  }
+
+  /** Cet onglet est-il celui qui synchronise ? */
+  get active(): boolean {
+    return this.timer !== null
   }
 
   private onOnline = () => void this.syncNow()
@@ -8784,6 +8815,7 @@ export class RemoteError extends Error {}
 
 const PAGE = 1000
 const PUSH_CHUNK = 200
+const PUSH_BYTES = 400_000
 
 async function send(input: string, init: RequestInit): Promise<Response> {
   try {
@@ -8826,6 +8858,8 @@ export class SupabaseRemote {
   private readonly dossier: string
   /** Appelé quand le jeton de rafraîchissement change (à enregistrer) */
   onSession?: (s: Session) => void
+  /** Dernier jeton de rafraîchissement enregistré (un autre onglet a pu le renouveler entre-temps) */
+  latestRefreshToken?: () => string | undefined
 
   constructor(url: string, anonKey: string, dossier: string, refreshToken?: string, email = '') {
     this.url = url
@@ -8850,11 +8884,20 @@ export class SupabaseRemote {
   private async refresh(): Promise<Session> {
     const current = this.session
     if (!current?.refreshToken) throw new AuthError('Session absente')
-    const res = await send(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
-      method: 'POST',
-      headers: { apikey: this.anonKey, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: current.refreshToken }),
-    })
+    // Supabase n'accepte qu'une fois chaque jeton : on part toujours du plus récent enregistré
+    const token = this.latestRefreshToken?.() || current.refreshToken
+    const call = (refresh_token: string) =>
+      send(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
+        method: 'POST',
+        headers: { apikey: this.anonKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token }),
+      })
+    let res = await call(token)
+    if (!res.ok && res.status < 500) {
+      // Renouvelé par un autre onglet pendant l'appel : on réessaie avec le jeton enregistré par celui-ci
+      const latest = this.latestRefreshToken?.()
+      if (latest && latest !== token) res = await call(latest)
+    }
     if (!res.ok) {
       if (res.status >= 500) throw new RemoteError(await errorText(res))
       throw new AuthError(await errorText(res))
@@ -8918,22 +8961,27 @@ export class SupabaseRemote {
     }
   }
 
-  /** Envoi (insertion ou mise à jour) par paquets */
+  /** Envoi (insertion ou mise à jour) par paquets d'au plus 200 lignes et ~400 Ko (images du papier à en-tête) */
   async push(rows: RemoteRow[]): Promise<void> {
-    for (let i = 0; i < rows.length; i += PUSH_CHUNK) {
-      const chunk = rows.slice(i, i + PUSH_CHUNK).map((r) => ({
-        dossier: this.dossier,
-        collection: r.collection,
-        id: r.id,
-        data: r.data,
-        deleted: r.deleted,
-      }))
+    let chunk: string[] = []
+    let size = 0
+    const flush = async () => {
+      if (!chunk.length) return
       await this.rest('records', {
         method: 'POST',
         headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-        body: JSON.stringify(chunk),
+        body: '[' + chunk.join(',') + ']',
       })
+      chunk = []
+      size = 0
     }
+    for (const r of rows) {
+      const json = JSON.stringify({ dossier: this.dossier, collection: r.collection, id: r.id, data: r.data, deleted: r.deleted })
+      if (chunk.length && (chunk.length >= PUSH_CHUNK || size + json.length > PUSH_BYTES)) await flush()
+      chunk.push(json)
+      size += json.length
+    }
+    await flush()
   }
 
   /** Le compte connecté figure-t-il dans la liste des membres du dossier ? */
@@ -8992,6 +9040,7 @@ export function createEngine(config: SyncConfig): SyncEngine {
     const current = loadConfig()
     if (current) saveConfig({ ...current, refreshToken: s.refreshToken, email: s.email })
   }
+  remote.latestRefreshToken = () => loadConfig()?.refreshToken
   engine = new SyncEngine(remote, config.dossier)
   unsubscribe = engine.subscribe((s) => {
     status = s
@@ -10634,6 +10683,8 @@ L'adresse est publique, mais les données restent protégées : il faut un compt
 - **Deux personnes sur la même pièce** : la dernière modification enregistrée l'emporte, avec deux exceptions :
   une pièce validée ne revient jamais en brouillon et ne peut pas être supprimée par un autre poste, et les
   règlements saisis sur deux postes s'additionnent.
+- **Plusieurs onglets** sur un même ordinateur : c'est possible ; un seul onglet synchronise (« Synchronisé par un
+  autre onglet » dans les autres) et un autre prend le relais si on le ferme.
 - **Utilisateurs et droits** : les profils ProfitPilot (code PIN, droits par module) sont partagés entre les postes.
   Le compte Supabase sert à autoriser l'ordinateur ; le code PIN identifie la personne.
 - **Sauvegardes** : continuez à télécharger une sauvegarde de temps en temps. Supabase fait aussi des sauvegardes

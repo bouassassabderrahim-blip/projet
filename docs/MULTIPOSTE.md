@@ -98,6 +98,8 @@ L'adresse est publique, mais les données restent protégées : il faut un compt
 - **Deux personnes sur la même pièce** : la dernière modification enregistrée l'emporte, avec deux exceptions :
   une pièce validée ne revient jamais en brouillon et ne peut pas être supprimée par un autre poste, et les
   règlements saisis sur deux postes s'additionnent.
+- **Plusieurs onglets** sur un même ordinateur : c'est possible ; un seul onglet synchronise (« Synchronisé par un
+  autre onglet » dans les autres) et un autre prend le relais si on le ferme.
 - **Utilisateurs et droits** : les profils ProfitPilot (code PIN, droits par module) sont partagés entre les postes.
   Le compte Supabase sert à autoriser l'ordinateur ; le code PIN identifie la personne.
 - **Sauvegardes** : continuez à télécharger une sauvegarde de temps en temps. Supabase fait aussi des sauvegardes

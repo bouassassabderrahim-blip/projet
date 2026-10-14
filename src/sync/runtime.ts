@@ -22,6 +22,7 @@ export function createEngine(config: SyncConfig): SyncEngine {
 		const current = loadConfig()
 		if (current) saveConfig({ ...current, refreshToken: s.refreshToken, email: s.email })
 	}
+	remote.latestRefreshToken = () => loadConfig()?.refreshToken
 	engine = new SyncEngine(remote, config.dossier)
 	unsubscribe = engine.subscribe((s) => {
 		status = s
