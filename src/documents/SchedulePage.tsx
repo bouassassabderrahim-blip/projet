@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import { downloadCsv } from './csv'
 import { balanceOf, isActive } from './ledger'
 import { addDays, daysBetween, frDate, today } from './numbering'
@@ -54,6 +55,7 @@ export default function SchedulePage({ documents, cash, onCashChange, onNavigate
 	const now = today()
 	const [cashText, setCashText] = useState(String(cash))
 	const [side, setSide] = useState<'all' | 'in' | 'out'>('all')
+	const canWrite = useAccess().level('finance') === 'write'
 
 	const entries = useMemo<Entry[]>(() => {
 		const list: Entry[] = []
@@ -116,7 +118,7 @@ export default function SchedulePage({ documents, cash, onCashChange, onNavigate
 			<div className="doc-stats">
 				<div>
 					<span>Trésorerie disponible</span>
-					<input className="num doc-cash-input" value={cashText} onChange={(e) => saveCash(e.target.value)} aria-label="Trésorerie disponible" />
+					<input className="num doc-cash-input" readOnly={!canWrite} value={cashText} onChange={(e) => saveCash(e.target.value)} aria-label="Trésorerie disponible" />
 				</div>
 				<div>
 					<span>À encaisser (clients)</span>

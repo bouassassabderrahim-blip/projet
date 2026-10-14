@@ -7,6 +7,7 @@ import { expiryState } from '../documents/stockMoves'
 import { computeTotals, formatMAD, round2 } from '../documents/tva'
 import { DOC_LABELS, STATUS_LABELS, type CommercialDocument, type DocKind, type StockLot } from '../documents/types'
 import Icon from './icons'
+import { useAccess } from '../access/context'
 import type { ModuleId } from './navigation'
 
 interface Props {
@@ -40,6 +41,8 @@ const compactMAD = (v: number) =>
 export default function Launchpad({ companyName, documents, products, lots, cash, onNavigate, onOpenDocument, onCreate }: Props) {
 	const now = today()
 	const month = now.slice(0, 7)
+	const access = useAccess()
+	const showCosts = access.can('costs')
 
 	const tiles = useMemo<Tile[]>(() => {
 		let monthHT = 0
@@ -90,7 +93,7 @@ export default function Launchpad({ companyName, documents, products, lots, cash
 		const forecast = cash + receivable - payable
 
 		return [
-			{ module: 'sales', title: 'CA du mois (HT)', value: compactMAD(round2(monthHT)), sub: monthHT ? `marge ${Math.round((monthMargin / monthHT) * 100)} %` : 'aucune facture ce mois', page: 'stats' },
+			{ module: 'sales', title: 'CA du mois (HT)', value: compactMAD(round2(monthHT)), sub: !monthHT ? 'aucune facture ce mois' : showCosts ? `marge ${Math.round((monthMargin / monthHT) * 100)} %` : 'net des avoirs', page: 'stats' },
 			{ module: 'sales', title: 'Devis en cours', value: String(quotes), sub: compactMAD(round2(quotesHT)) + ' HT à transformer', page: 'quotes' },
 			{ module: 'sales', title: 'Factures échues', value: String(lateCount), sub: compactMAD(round2(late)) + ' à relancer', page: 'invoices', tone: lateCount ? 'danger' : 'good' },
 			{ module: 'sales', title: 'Implants en dépôt', value: String(depot), sub: 'chez les cliniques', page: 'depots' },
@@ -103,11 +106,16 @@ export default function Launchpad({ companyName, documents, products, lots, cash
 			{ module: 'finance', title: 'Solde prévisionnel', value: compactMAD(round2(forecast)), sub: 'trésorerie + créances − dettes', page: 'schedule', tone: forecast < 0 ? 'danger' : undefined },
 			{ module: 'finance', title: 'TVA du mois (estimation)', value: compactMAD(round2(monthVat)), sub: monthVat < 0 ? 'crédit de TVA' : 'collectée − déductible', page: 'vat' },
 		]
-	}, [documents, products, lots, cash, month, now])
+	}, [documents, products, lots, cash, month, now, showCosts])
+
+	const visibleTiles = tiles.filter((t) => access.level(t.module) !== 'none' && (showCosts || t.title !== 'Valeur du stock'))
+	const sideOk = (d: CommercialDocument) => access.level(DOC_LABELS[d.kind].side === 'sale' ? 'sales' : 'purchases') !== 'none'
+	const canCreate = (side: 'sales' | 'purchases') => access.level(side) === 'write'
 
 	const recent = useMemo(
-		() => [...documents].sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number)).slice(0, 8),
-		[documents],
+		() => [...documents].filter(sideOk).sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number)).slice(0, 8),
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+		[documents, access],
 	)
 
 	const groups: { module: ModuleId; label: string }[] = [
@@ -122,34 +130,43 @@ export default function Launchpad({ companyName, documents, products, lots, cash
 		<div className="erp-home">
 			<div className="erp-home-head">
 				<div>
-					<h2>{hour < 18 ? 'Bonjour' : 'Bonsoir'}</h2>
+					<h2>
+						{hour < 18 ? 'Bonjour' : 'Bonsoir'}
+						{access.user ? ` ${access.user.name}` : ''}
+					</h2>
 					<p>
 						{companyName || 'Votre dossier'} · {new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
 					</p>
 				</div>
 				<div className="erp-quick">
-					<button type="button" className="btn-primary" onClick={() => onCreate('quote')}>
-						+ Devis
-					</button>
-					<button type="button" onClick={() => onCreate('invoice')}>
-						+ Facture
-					</button>
-					<button type="button" onClick={() => onCreate('delivery')}>
-						+ BL
-					</button>
-					<button type="button" onClick={() => onCreate('purchase')}>
-						+ Commande fournisseur
-					</button>
+					{canCreate('sales') && (
+						<>
+							<button type="button" className="btn-primary" onClick={() => onCreate('quote')}>
+								+ Devis
+							</button>
+							<button type="button" onClick={() => onCreate('invoice')}>
+								+ Facture
+							</button>
+							<button type="button" onClick={() => onCreate('delivery')}>
+								+ BL
+							</button>
+						</>
+					)}
+					{canCreate('purchases') && (
+						<button type="button" onClick={() => onCreate('purchase')}>
+							+ Commande fournisseur
+						</button>
+					)}
 				</div>
 			</div>
 
-			{groups.map((g) => (
+			{groups.filter((g) => visibleTiles.some((t) => t.module === g.module)).map((g) => (
 				<section key={g.module} className="erp-tile-group">
 					<h3>
 						<Icon name={g.module} /> {g.label}
 					</h3>
 					<div className="erp-tiles">
-						{tiles
+						{visibleTiles
 							.filter((t) => t.module === g.module)
 							.map((t) => (
 								<button key={t.title} type="button" className={`erp-tile ${t.tone ? `erp-tile-${t.tone}` : ''}`} onClick={() => onNavigate(t.page)}>

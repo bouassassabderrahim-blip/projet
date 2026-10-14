@@ -150,6 +150,9 @@ export interface CommercialDocument {
 	intervention?: Intervention
 	/** Numéro de la facture chez le fournisseur */
 	supplierRef?: string
+	/** Traçabilité : utilisateur qui a créé et validé la pièce */
+	createdBy?: string
+	validatedBy?: string
 	/** Document d'origine (ex. le BC ayant donné ce BL) */
 	sourceId?: string
 	sourceNumber?: string

@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { frDate, newId, today } from './numbering'
 import { expiryState, type ExpiryState } from './stockMoves'
@@ -29,6 +30,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
 	const [filter, setFilter] = useState<Filter>(initialQuery ? '' : 'available')
 	const [draft, setDraft] = useState({ productId: '', lot: '', serial: '', expiry: '', quantity: '1', supplier: '' })
 	const [error, setError] = useState('')
+	const canWrite = useAccess().level('stock') === 'write'
 	const now = today()
 	const productName = (id: string) => products.find((p) => p.id === id)?.name ?? '(article supprimé)'
 
@@ -108,7 +110,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
 				</div>
 			</div>
 
-			<div className="doc-panel">
+			{canWrite && <div className="doc-panel">
 				<div className="doc-panel-title">Entrée manuelle d'un lot (stock initial)</div>
 				<div className="doc-grid">
 					<label>
@@ -151,7 +153,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
 					</button>
 					<span className="doc-count">Les bons de réception validés créent les lots automatiquement.</span>
 				</div>
-			</div>
+			</div>}
 
 			<div className="doc-toolbar">
 				<input
@@ -203,6 +205,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
 											type="number"
 											min={0}
 											value={l.quantity}
+											readOnly={!canWrite}
 											onChange={(e) => setQty(l.id, Number(e.target.value))}
 										/>
 									</td>

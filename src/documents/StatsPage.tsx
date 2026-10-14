@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { isActive, sign } from './ledger'
 import { computeTotals, formatMAD, lineHT, round2 } from './tva'
@@ -121,6 +122,7 @@ export default function StatsPage({ documents, products }: Props) {
 	}, [documents])
 	const [year, setYear] = useState(years[0])
 	const [showTable, setShowTable] = useState(false)
+	const showCosts = useAccess().can('costs')
 
 	const stats = useMemo(() => {
 		const cost = new Map(products.map((p) => [p.id, p.unitCost]))
@@ -209,14 +211,18 @@ export default function StatsPage({ documents, products }: Props) {
 						</small>
 					)}
 				</div>
-				<div>
-					<span>Marge brute</span>
-					<strong>{formatMAD(round2(stats.margin))}</strong>
-				</div>
-				<div>
-					<span>Taux de marge</span>
-					<strong>{pct(rate)}</strong>
-				</div>
+				{showCosts && (
+					<div>
+						<span>Marge brute</span>
+						<strong>{formatMAD(round2(stats.margin))}</strong>
+					</div>
+				)}
+				{showCosts && (
+					<div>
+						<span>Taux de marge</span>
+						<strong>{pct(rate)}</strong>
+					</div>
+				)}
 				<div>
 					<span>Factures · panier moyen HT</span>
 					<strong>
@@ -316,8 +322,8 @@ export default function StatsPage({ documents, products }: Props) {
 							<th>Article</th>
 							<th className="num">Quantité</th>
 							<th className="num">CA HT</th>
-							<th className="num">Marge</th>
-							<th className="num">Taux de marge</th>
+							{showCosts && <th className="num">Marge</th>}
+							{showCosts && <th className="num">Taux de marge</th>}
 						</tr>
 					</thead>
 					<tbody>
@@ -326,8 +332,8 @@ export default function StatsPage({ documents, products }: Props) {
 								<td>{it.name}</td>
 								<td className="num">{it.qty}</td>
 								<td className="num">{formatMAD(round2(it.ht))}</td>
-								<td className="num">{it.costKnown ? formatMAD(round2(it.ht - it.cost)) : '—'}</td>
-								<td className="num">{it.costKnown && it.ht ? pct(((it.ht - it.cost) / it.ht) * 100) : '—'}</td>
+								{showCosts && <td className="num">{it.costKnown ? formatMAD(round2(it.ht - it.cost)) : '—'}</td>}
+								{showCosts && <td className="num">{it.costKnown && it.ht ? pct(((it.ht - it.cost) / it.ht) * 100) : '—'}</td>}
 							</tr>
 						))}
 					</tbody>

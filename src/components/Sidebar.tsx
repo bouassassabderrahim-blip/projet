@@ -1,5 +1,6 @@
 import type { PageId } from '../types'
-import { PAGE_LABELS, type ModuleDef } from '../shell/navigation'
+import { ADMIN_PAGES, PAGE_LABELS, type ModuleDef } from '../shell/navigation'
+import { useAccess } from '../access/context'
 
 interface SidebarProps {
   module: ModuleDef
@@ -11,14 +12,18 @@ interface SidebarProps {
 
 /** Menu du module en cours, rubrique par rubrique */
 export default function Sidebar({ module, current, onNavigate, badges }: SidebarProps) {
+  const { isAdmin } = useAccess()
   return (
     <aside className="sidebar no-print">
       <div className="brand">{module.label}</div>
       <nav>
-        {module.groups.map((group) => (
+        {module.groups.map((group) => {
+          const pages = group.pages.filter((id) => isAdmin || !ADMIN_PAGES.includes(id))
+          if (pages.length === 0) return null
+          return (
           <div key={group.title}>
             <div className="nav-section-title">{group.title}</div>
-            {group.pages.map((id) => {
+            {pages.map((id) => {
               const badge = badges?.[id]
               return (
                 <button
@@ -32,7 +37,8 @@ export default function Sidebar({ module, current, onNavigate, badges }: Sidebar
               )
             })}
           </div>
-        ))}
+          )
+        })}
       </nav>
     </aside>
   )

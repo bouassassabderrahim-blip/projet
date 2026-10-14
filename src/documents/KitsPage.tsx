@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { newId } from './numbering'
 import { formatMAD, round2 } from './tva'
@@ -15,6 +16,7 @@ interface Props {
 export default function KitsPage({ kits, onChange, products }: Props) {
 	const [editing, setEditing] = useState<Kit | null>(null)
 	const [error, setError] = useState('')
+	const canWrite = useAccess().level('stock') === 'write'
 	const product = (id: string) => products.find((p) => p.id === id)
 	const kitPrice = (k: Kit) => round2(k.items.reduce((s, i) => s + (product(i.productId)?.unitPrice ?? 0) * i.quantity, 0))
 
@@ -108,13 +110,15 @@ export default function KitsPage({ kits, onChange, products }: Props) {
 	return (
 		<div>
 			<div className="doc-toolbar">
-				<button
-					type="button"
-					className="btn-primary"
-					onClick={() => setEditing({ id: newId(), name: '', items: [{ productId: '', quantity: 1 }] })}
-				>
-					+ Nouveau kit
-				</button>
+				{canWrite && (
+					<button
+						type="button"
+						className="btn-primary"
+						onClick={() => setEditing({ id: newId(), name: '', items: [{ productId: '', quantity: 1 }] })}
+					>
+						+ Nouveau kit
+					</button>
+				)}
 				<span className="doc-count">Un kit s'insère en un clic dans un devis, un BL ou une facture.</span>
 			</div>
 			{kits.length === 0 ? (
@@ -140,6 +144,7 @@ export default function KitsPage({ kits, onChange, products }: Props) {
 								</td>
 								<td className="num">{formatMAD(kitPrice(k))}</td>
 								<td className="doc-actions">
+									{canWrite && <>
 									<button type="button" onClick={() => setEditing(k)}>
 										Modifier
 									</button>
@@ -149,6 +154,7 @@ export default function KitsPage({ kits, onChange, products }: Props) {
 									>
 										Supprimer
 									</button>
+									</>}
 								</td>
 							</tr>
 						))}

@@ -315,3 +315,5 @@ body:has(.layout.erp) { margin: 0; }
 @media screen {
 	.layout.erp .print-only { display: none; }
 }
+.erp-secure { background: #b45309 !important; }
+.erp-secure:hover { background: #d97706 !important; }

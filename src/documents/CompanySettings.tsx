@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAccess } from '../access/context'
 import DocumentPrint from './DocumentPrint'
 import { loadImage, printSettingsOf } from './printSettings'
 import type { CommercialDocument, CompanyInfo, LetterheadMode, PrintSettings } from './types'
@@ -55,6 +56,8 @@ export default function CompanySettings({ company, onChange }: Props) {
 	const [draft, setDraft] = useState(company)
 	const [saved, setSaved] = useState(false)
 	const [error, setError] = useState('')
+	const access = useAccess()
+	const canWrite = access.level('settings') === 'write'
 	const print = printSettingsOf(draft)
 	const iceInvalid = draft.ice !== '' && !/^\d{15}$/.test(draft.ice)
 	const ribInvalid = draft.rib !== '' && !/^\d{24}$/.test(draft.rib.replace(/\s/g, ''))
@@ -84,6 +87,7 @@ export default function CompanySettings({ company, onChange }: Props) {
 		try {
 			onChange(draft)
 			setSaved(true)
+			access.log('Paramètres société modifiés', draft.name)
 		} catch {
 			setError('Enregistrement impossible : images trop lourdes pour le navigateur.')
 		}
@@ -99,7 +103,7 @@ export default function CompanySettings({ company, onChange }: Props) {
 			<div className="doc-editor-head">
 				<h2>Fiche société et mise en page</h2>
 				<div className="doc-editor-actions">
-					<button type="button" className="btn-primary" disabled={iceInvalid} onClick={save}>
+					<button type="button" className="btn-primary" disabled={iceInvalid || !canWrite} onClick={save}>
 						Enregistrer
 					</button>
 					{saved && <span className="doc-count">Enregistré ✓</span>}

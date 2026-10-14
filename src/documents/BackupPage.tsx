@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAccess } from '../access/context'
 import { downloadFile } from './csv'
 import { LAST_BACKUP_KEY, createBackup, isBackupFile, restoreBackup } from './storage'
 import { daysBetween, frDate, today } from './numbering'
@@ -17,6 +18,7 @@ export default function BackupPage() {
 	const [last, setLast] = useState(readLastBackup)
 	const [message, setMessage] = useState('')
 	const [error, setError] = useState('')
+	const access = useAccess()
 	const age = last ? daysBetween(last, today()) : null
 
 	function exportAll() {
@@ -28,6 +30,7 @@ export default function BackupPage() {
 			// stockage indisponible
 		}
 		setLast(today())
+		access.log('Sauvegarde téléchargée', `${Object.keys(backup.data).length} jeux de données`)
 		setMessage(`Sauvegarde téléchargée (${Object.keys(backup.data).length} jeux de données).`)
 	}
 
@@ -70,7 +73,11 @@ export default function BackupPage() {
 			<fieldset className="doc-panel">
 				<legend>Restaurer</legend>
 				<p>Remplace toutes les données de ce navigateur par celles d'un fichier de sauvegarde.</p>
-				<input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
+				{access.isAdmin ? (
+					<input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
+				) : (
+					<p className="doc-warning">Seul un administrateur peut restaurer une sauvegarde.</p>
+				)}
 			</fieldset>
 
 			{message && <p className="doc-info">{message}</p>}

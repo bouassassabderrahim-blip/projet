@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { getStockStatus } from '../utils/stock'
 import { addDays, emptyLine, frDate, newId, nextNumber, today } from './numbering'
@@ -37,6 +38,9 @@ function suggestedQty(p: Product, ordered: number): number {
 /** Alertes de stock : ruptures, articles sous le seuil, lots périmés, et réapprovisionnement */
 export default function StockAlertsPage({ products, lots, documents, onChange, onNavigate, onOpenStock }: Props) {
 	const now = today()
+	const access = useAccess()
+	const canOrder = access.level('purchases') === 'write'
+	const showCosts = access.can('costs')
 	const ordered = useMemo(() => onOrder(documents), [documents])
 
 	const alerts = useMemo(
@@ -97,6 +101,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
 			notes: 'Réapprovisionnement (alertes de stock)',
 		}
 		onChange([...documents, order])
+		access.log('Commande de réapprovisionnement', `${order.number} · ${supplier}`)
 		onNavigate('purchase', id)
 	}
 
@@ -152,7 +157,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
 									<th className="num">Seuil</th>
 									<th className="num">En commande</th>
 									<th className="num">À commander</th>
-									<th className="num">Coût estimé HT</th>
+									{showCosts && <th className="num">Coût estimé HT</th>}
 								</tr>
 							</thead>
 							<tbody>
@@ -172,7 +177,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
 										<td className="num">
 											<strong>{a.suggested || '—'}</strong>
 										</td>
-										<td className="num">{a.suggested ? formatMAD(round2(a.suggested * a.product.unitCost)) : ''}</td>
+										{showCosts && <td className="num">{a.suggested ? formatMAD(round2(a.suggested * a.product.unitCost)) : ''}</td>}
 									</tr>
 								))}
 							</tbody>
@@ -192,7 +197,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
 							<tr>
 								<th>Fournisseur</th>
 								<th>Articles</th>
-								<th className="num">Montant estimé HT</th>
+								{showCosts && <th className="num">Montant estimé HT</th>}
 								<th />
 							</tr>
 						</thead>
@@ -201,13 +206,17 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
 								<tr key={supplier}>
 									<td>{supplier}</td>
 									<td>{items.map((a) => `${a.suggested} × ${a.product.name}`).join(', ')}</td>
-									<td className="num">
-										{formatMAD(round2(items.reduce((s, a) => s + a.suggested * a.product.unitCost, 0)))}
-									</td>
+									{showCosts && (
+										<td className="num">
+											{formatMAD(round2(items.reduce((s, a) => s + a.suggested * a.product.unitCost, 0)))}
+										</td>
+									)}
 									<td>
-										<button type="button" className="btn-primary" onClick={() => createPurchase(supplier, items)}>
-											Créer la commande fournisseur
-										</button>
+										{canOrder && (
+											<button type="button" className="btn-primary" onClick={() => createPurchase(supplier, items)}>
+												Créer la commande fournisseur
+											</button>
+										)}
 									</td>
 								</tr>
 							))}

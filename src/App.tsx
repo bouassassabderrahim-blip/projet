@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FixedCost, PageId, Product } from './types'
 import { sampleProducts } from './data/sampleProducts'
 import Sidebar from './components/Sidebar'
@@ -38,9 +38,16 @@ import WorkTabs from './shell/WorkTabs'
 import StatusBar from './shell/StatusBar'
 import GlobalSearch, { type SearchHit } from './shell/GlobalSearch'
 import Launchpad from './shell/Launchpad'
-import { MODULES, moduleOf, type ModuleId } from './shell/navigation'
+import { ADMIN_PAGES, MODULES, moduleOf, type ModuleId } from './shell/navigation'
 import { LAST_BACKUP_KEY } from './documents/storage'
-import { daysBetween, today } from './documents/numbering'
+import { AccessContext, accessFor } from './access/context'
+import { readSession, useAccessSettings, useAudit, useUsers, writeSession } from './access/storage'
+import type { AuditEntry, User } from './access/types'
+import LoginScreen from './access/LoginScreen'
+import UsersPage from './access/UsersPage'
+import AuditPage from './access/AuditPage'
+import { AccessDenied, ReadOnlyArea } from './access/ReadOnly'
+import { daysBetween, newId, today } from './documents/numbering'
 import './theme.css'
 import './documents/documents.css'
 import './pro-theme.css'
@@ -83,6 +90,8 @@ const titles: Record<PageId, string> = {
 	vat: 'Déclaration de TVA',
 	company: 'Société et mise en page des documents',
 	backup: 'Sauvegarde des données',
+	users: 'Utilisateurs et droits d’accès',
+	audit: 'Journal d’activité',
 }
 
 // Correspondance entre les pages et les types de pièces commerciales
@@ -124,6 +133,8 @@ const commercialPages = new Set<PageId>([
 	'vat',
 	'company',
 	'backup',
+	'users',
+	'audit',
 ] as PageId[])
 
 function isProduct(x: unknown): x is Product {
@@ -209,6 +220,64 @@ export default function App() {
 	const [cash, setCash] = useCashBalance()
 	// Bandeau d'alerte de stock masquable jusqu'au prochain chargement
 	const [alertBannerHidden, setAlertBannerHidden] = useState(false)
+
+	// ---------- Utilisateurs, session et journal d'activité ----------
+	const [users, setUsers] = useUsers()
+	const [audit, setAudit] = useAudit()
+	const [accessSettings, setAccessSettings] = useAccessSettings()
+	const [sessionId, setSessionId] = useState(readSession)
+	const [locked, setLocked] = useState(false)
+	const currentUser = users.find((u) => u.id === sessionId && u.active) ?? null
+	const needsLogin = users.length > 0 && (!currentUser || locked)
+
+	const log = useCallback(
+		(action: string, detail: string, who?: string) => {
+			const entry: AuditEntry = { id: newId(), at: new Date().toISOString(), user: who ?? currentUser?.name ?? 'Administrateur (installation)', action, detail }
+			// On garde les 5 000 dernières actions
+			setAudit((a) => [...a, entry].slice(-5000))
+		},
+		[currentUser, setAudit],
+	)
+	const access = useMemo(() => accessFor(currentUser, log), [currentUser, log])
+
+	function login(user: User) {
+		const at = new Date().toISOString()
+		setUsers((list) => list.map((u) => (u.id === user.id ? { ...u, lastLogin: at } : u)))
+		writeSession(user.id)
+		setSessionId(user.id)
+		log(locked && user.id === sessionId ? 'Session déverrouillée' : 'Connexion', user.name, user.name)
+		// Changement d'utilisateur : on repart de l'accueil (pas à la création du premier compte)
+		if (sessionId && user.id !== sessionId) {
+			setPage('home')
+			setTabs(['home'])
+		}
+		setLocked(false)
+	}
+
+	function logout() {
+		log('Déconnexion', currentUser?.name ?? '')
+		writeSession(null)
+		setSessionId(null)
+		setLocked(false)
+		setPage('home')
+		setTabs(['home'])
+	}
+
+	// Verrouillage automatique après inactivité
+	useEffect(() => {
+		if (!currentUser || locked || !accessSettings.lockMinutes) return
+		let timer = window.setTimeout(() => setLocked(true), accessSettings.lockMinutes * 60_000)
+		const reset = () => {
+			window.clearTimeout(timer)
+			timer = window.setTimeout(() => setLocked(true), accessSettings.lockMinutes * 60_000)
+		}
+		const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart']
+		for (const e of events) window.addEventListener(e, reset, { passive: true })
+		return () => {
+			window.clearTimeout(timer)
+			for (const e of events) window.removeEventListener(e, reset)
+		}
+	}, [currentUser, locked, accessSettings.lockMinutes])
 
 	useEffect(() => {
 		try {
@@ -366,10 +435,35 @@ export default function App() {
 		if (badges.depots) list.push({ id: 'dep', severity: 'info', page: 'depots', text: `${badges.depots} implant(s) en dépôt chez les cliniques` })
 		if (!lastBackup || daysBetween(lastBackup, today()) > 7)
 			list.push({ id: 'bak', severity: 'warning', page: 'backup', text: lastBackup ? 'Dernière sauvegarde il y a plus de 7 jours' : 'Aucune sauvegarde effectuée' })
-		return list
-	}, [badges, stockAlerts, lastBackup])
+		// Chacun ne voit que les alertes des modules qui lui sont ouverts
+		return list.filter((n) => access.level(moduleOf(n.page).id) !== 'none')
+	}, [badges, stockAlerts, lastBackup, access])
 
 	const currentModule = moduleOf(page)
+	const pageLevel = access.level(currentModule.id)
+	const pageAllowed = pageLevel !== 'none' && (access.isAdmin || !ADMIN_PAGES.includes(page))
+	// Pages d'origine sans gestion des droits : en lecture seule, on désactive leurs champs
+	const lockFields = ['catalog', 'stock', 'import', 'breakeven'].includes(page)
+
+	// Recherche limitée à ce que l'utilisateur a le droit de voir
+	const searchable = {
+		documents: documents.filter((d) => access.level(d.kind === 'purchase' || d.kind === 'receipt' || d.kind === 'bill' ? 'purchases' : 'sales') !== 'none'),
+		parties: parties.filter((p) => access.level(p.role === 'client' ? 'sales' : 'purchases') !== 'none'),
+		products: access.level('stock') !== 'none' ? products : [],
+		lots: access.level('stock') !== 'none' ? lots : [],
+	}
+
+	if (needsLogin)
+		return (
+			<LoginScreen
+				users={users}
+				companyName={company.name}
+				logo={company.logo}
+				lockedUser={locked && currentUser ? currentUser : undefined}
+				onLogin={login}
+			/>
+		)
+
 	const moduleBadges: Partial<Record<ModuleId, number>> = {
 		sales: badges.invoices,
 		purchases: badges.bills,
@@ -377,6 +471,7 @@ export default function App() {
 	}
 
 	return (
+		<AccessContext.Provider value={access}>
 		<div className="layout erp">
 			<TopBar
 				companyName={company.name}
@@ -384,6 +479,11 @@ export default function App() {
 				onSearch={() => setSearchOpen(true)}
 				onNavigate={navigate}
 				onCreate={(kind) => openDocument(kind, 'new')}
+				onLock={() => {
+					log('Session verrouillée', currentUser?.name ?? '')
+					setLocked(true)
+				}}
+				onLogout={logout}
 			/>
 			<ModuleBar current={currentModule.id} onOpen={navigate} badges={moduleBadges} />
 			<div className="erp-body">
@@ -416,7 +516,7 @@ export default function App() {
 					{isSampleData ? ' · données de démonstration' : ''}
 				</p>
 				{page !== 'home' && <h1>{titles[page]}</h1>}
-				{stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && (
+				{stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && access.level('stock') !== 'none' && (
 					<div className="stock-alert-banner no-print">
 						<span>
 							<strong>Alerte stock :</strong>{' '}
@@ -436,6 +536,9 @@ export default function App() {
 						</button>
 					</div>
 				)}
+				{!pageAllowed && <AccessDenied />}
+				{pageAllowed && (
+				<ReadOnlyArea readOnly={pageLevel === 'read'} lock={lockFields}>
 				{!commercialPages.has(page) && (
 					<>
 						<div className="export-bar" style={{ alignItems: 'center' }}>
@@ -549,19 +652,32 @@ export default function App() {
 				{page === 'vat' && <VatPage documents={documents} />}
 				{page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
 				{page === 'backup' && <BackupPage />}
+				{page === 'users' && (
+					<UsersPage
+						users={users}
+						onChange={setUsers}
+						settings={accessSettings}
+						onSettingsChange={setAccessSettings}
+						onFirstAdmin={login}
+					/>
+				)}
+				{page === 'audit' && <AuditPage entries={audit} />}
+				</ReadOnlyArea>
+				)}
 			</main>
 			</div>
 			<StatusBar companyName={company.name} documentsCount={documents.length} productsCount={products.length} lastBackup={lastBackup} />
 			{searchOpen && (
 				<GlobalSearch
-					documents={documents}
-					parties={parties}
-					products={products}
-					lots={lots}
+					documents={searchable.documents}
+					parties={searchable.parties}
+					products={searchable.products}
+					lots={searchable.lots}
 					onPick={pickSearch}
 					onClose={() => setSearchOpen(false)}
 				/>
 			)}
 		</div>
+		</AccessContext.Provider>
 	)
 }

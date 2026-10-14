@@ -1,0 +1,112 @@
+/* ---------- Connexion ---------- */
+.login-screen {
+	position: fixed;
+	inset: 0;
+	display: grid;
+	place-items: center;
+	background: linear-gradient(160deg, #13293d 0%, #1f4e79 60%, #2b6cb0 100%);
+	font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+	z-index: 200;
+}
+.login-card {
+	width: min(420px, calc(100vw - 32px));
+	padding: 26px 28px 20px;
+	background: #fff;
+	border-radius: 8px;
+	box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+	color: #1e293b;
+}
+.login-head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.login-head .erp-logo { width: 40px; height: 40px; font-size: 15px; color: #fff; }
+.login-head strong { display: block; font-size: 17px; color: #1f4e79; }
+.login-head span { font-size: 13px; color: #5b6b7d; }
+.login-logo { max-height: 44px; max-width: 120px; object-fit: contain; }
+.login-title { margin: 0 0 10px; font-weight: 600; }
+.login-users { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.login-user {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+	padding: 8px 10px;
+	background: #f6f8fa;
+	border: 1px solid #d5dce4;
+	border-radius: 6px;
+	text-align: left;
+	cursor: pointer;
+	font: inherit;
+}
+.login-user:hover { border-color: #2b6cb0; background: #eef5fc; }
+.login-user span:last-child { display: flex; flex-direction: column; }
+.login-user small { color: #5b6b7d; }
+.login-user-selected { cursor: default; margin-bottom: 12px; }
+.login-avatar {
+	display: grid;
+	place-items: center;
+	width: 34px;
+	height: 34px;
+	border-radius: 50%;
+	background: #2b6cb0;
+	color: #fff;
+	font-weight: 700;
+}
+.login-pin {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 10px 12px;
+	font-size: 22px;
+	letter-spacing: 8px;
+	text-align: center;
+	border: 1px solid #aebbc9;
+	border-radius: 6px;
+}
+.login-pin:focus { outline: none; border-color: #2b6cb0; box-shadow: 0 0 0 3px rgba(43, 108, 176, 0.2); }
+.login-error { color: #b42318; font-size: 13px; margin: 8px 0 0; }
+.login-submit {
+	width: 100%;
+	margin-top: 12px;
+	padding: 10px;
+	border: 0;
+	border-radius: 6px;
+	background: #2b6cb0;
+	color: #fff;
+	font: inherit;
+	font-weight: 700;
+	cursor: pointer;
+}
+.login-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.login-back { width: 100%; margin-top: 8px; background: none; border: 0; color: #2b6cb0; cursor: pointer; font: inherit; }
+.login-foot { margin: 16px 0 0; font-size: 11.5px; color: #8a97a6; text-align: center; }
+
+/* ---------- Droits ---------- */
+.access-roles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px; margin-bottom: 12px; }
+.access-matrix { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(260px, 1fr); gap: 16px; align-items: start; }
+.access-actions { display: flex; flex-direction: column; gap: 8px; }
+.access-actions small { color: var(--pp-muted); }
+.access-center { text-align: center !important; }
+.access-level { display: inline-block; min-width: 22px; padding: 1px 5px; border-radius: 2px; font-size: 11px; font-weight: 700; }
+.access-write { background: #dcfce7; color: #166534; }
+.access-read { background: #e0ecfb; color: #1e40af; }
+.access-none { color: #94a3b8; }
+
+/* ---------- Lecture seule et accès refusé ---------- */
+.access-readonly-banner {
+	margin: 0 0 10px;
+	padding: 6px 10px;
+	background: #eef4ff;
+	border: 1px solid #a4bcfd;
+	border-left: 4px solid #2b6cb0;
+	border-radius: 3px;
+	font-size: 12.5px;
+	color: #1e3a8a;
+}
+fieldset.access-readonly { border: 0; padding: 0; margin: 0; min-width: 0; }
+.access-denied { margin-top: 40px; text-align: center; color: var(--pp-muted); }
+.access-denied strong { display: block; font-size: 16px; color: var(--pp-text); margin-bottom: 6px; }
+
+/* ---------- Menu utilisateur ---------- */
+.erp-user { display: flex; align-items: center; gap: 8px; padding: 3px 8px !important; border-radius: 4px; }
+.erp-user:hover { background: #1e3a52 !important; }
+.erp-user .login-avatar { width: 26px; height: 26px; font-size: 12px; }
+.erp-user small { display: block; font-size: 10.5px; color: #93a5b8; }
+.erp-user span:last-child { text-align: left; line-height: 1.15; }

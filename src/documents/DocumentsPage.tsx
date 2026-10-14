@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { Product } from '../types'
+import { useAccess } from '../access/context'
 import DocumentEditor from './DocumentEditor'
 import DocumentPrint from './DocumentPrint'
 import PaymentDialog from './PaymentDialog'
@@ -96,6 +97,13 @@ export default function DocumentsPage({
 	const [paying, setPaying] = useState<CommercialDocument | null>(null)
 	const [message, setMessage] = useState<{ text: string; kind?: DocKind; id?: string } | null>(null)
 	const info = DOC_LABELS[kind]
+	// Droits de l'utilisateur sur le module Ventes ou Achats
+	const access = useAccess()
+	const canWrite = access.level(info.side === 'sale' ? 'sales' : 'purchases') === 'write'
+	const canValidate = canWrite && access.can('validate')
+	const canDelete = canWrite && access.can('delete')
+	const canPay = access.can('payments')
+	const stamp = () => ({ by: access.user?.name ?? '' })
 	const isPurchase = info.side === 'purchase'
 	const role = isPurchase ? 'supplier' : 'client'
 	const now = today()
@@ -158,13 +166,18 @@ export default function DocumentsPage({
 
 	function save(doc: CommercialDocument) {
 		const exists = documents.some((d) => d.id === doc.id)
-		onChange(exists ? documents.map((d) => (d.id === doc.id ? doc : d)) : [...documents, doc])
+		const saved = exists ? doc : { ...doc, createdBy: stamp().by }
+		onChange(exists ? documents.map((d) => (d.id === doc.id ? saved : d)) : [...documents, saved])
+		access.log(exists ? 'Pièce modifiée' : 'Pièce créée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
 		rememberParty(doc)
 		setView({ mode: 'list' })
 	}
 
 	function setStatus(doc: CommercialDocument, status: DocStatus) {
-		let next = documents.map((d) => (d.id === doc.id ? { ...d, status } : d))
+		let next = documents.map((d) =>
+			d.id === doc.id ? { ...d, status, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
+		)
+		access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
 		const supplier = doc.party.name
 
 		if (status === 'validated') {
@@ -197,10 +210,12 @@ export default function DocumentsPage({
 			),
 		)
 		setPaying(null)
+		access.log(isPurchase ? 'Règlement fournisseur' : 'Encaissement', `${doc.number} · ${formatMAD(payment.amount)} · ${doc.party.name}`)
 	}
 
 	function remove(doc: CommercialDocument) {
 		if (!confirm(`Supprimer ${doc.number} ?`)) return
+		access.log('Pièce supprimée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
 		// Facture issue d'un dépôt : les implants redeviennent « en dépôt »
 		const refs = doc.lines.map((l) => l.depotRef).filter((r): r is { docId: string; lineId: string } => !!r)
 		onChange(
@@ -233,6 +248,8 @@ export default function DocumentsPage({
 				status: 'draft',
 				payments: undefined,
 				paidDate: undefined,
+				createdBy: undefined,
+				validatedBy: undefined,
 				sourceId: undefined,
 				sourceNumber: undefined,
 				lines: copyLines(doc.lines),
@@ -253,11 +270,14 @@ export default function DocumentsPage({
 			paidDate: undefined,
 			consignment: undefined,
 			supplierRef: to === 'bill' ? '' : undefined,
+			createdBy: stamp().by,
+			validatedBy: undefined,
 			sourceId: doc.id,
 			sourceNumber: doc.number,
 			lines: copyLines(doc.lines),
 		}
 		onChange([...documents, created])
+		access.log('Pièce transformée', `${doc.number} → ${created.number}`)
 		const label = DOC_LABELS[to]
 		setMessage({ text: `${label.title} ${created.number} créé(e) en brouillon à partir de ${doc.number}.`, kind: to, id: created.id })
 	}
@@ -349,9 +369,11 @@ export default function DocumentsPage({
 			)}
 
 			<div className="doc-toolbar">
-				<button type="button" className="btn-primary" onClick={() => setView({ mode: 'edit', doc: createDoc() })}>
-					+ {info.newLabel}
-				</button>
+				{canWrite && (
+					<button type="button" className="btn-primary" onClick={() => setView({ mode: 'edit', doc: createDoc() })}>
+						+ {info.newLabel}
+					</button>
+				)}
 				<input
 					className="doc-search"
 					placeholder="Rechercher : n°, tiers, patient, lot, n° de série…"
@@ -405,7 +427,7 @@ export default function DocumentsPage({
 								return (
 									<tr key={d.id} className={late ? 'doc-row-late' : undefined}>
 										<td>
-											<button type="button" className="doc-link" onClick={() => setView(d.status === 'draft' ? { mode: 'edit', doc: d } : { mode: 'print', id: d.id })}>
+											<button type="button" className="doc-link" onClick={() => setView(d.status === 'draft' && canWrite ? { mode: 'edit', doc: d } : { mode: 'print', id: d.id })}>
 												{d.number}
 											</button>
 										</td>
@@ -433,18 +455,24 @@ export default function DocumentsPage({
 											</button>
 											{d.status === 'draft' && (
 												<>
-													<button type="button" onClick={() => setView({ mode: 'edit', doc: d })}>
-														Modifier
-													</button>
-													<button type="button" className="btn-primary" onClick={() => setStatus(d, 'validated')}>
-														Valider
-													</button>
-													<button type="button" onClick={() => remove(d)}>
-														Supprimer
-													</button>
+													{canWrite && (
+														<button type="button" onClick={() => setView({ mode: 'edit', doc: d })}>
+															Modifier
+														</button>
+													)}
+													{canValidate && (
+														<button type="button" className="btn-primary" onClick={() => setStatus(d, 'validated')}>
+															Valider
+														</button>
+													)}
+													{canDelete && (
+														<button type="button" onClick={() => remove(d)}>
+															Supprimer
+														</button>
+													)}
 												</>
 											)}
-											{hasBalance && d.status === 'validated' && balance > 0.01 && (
+											{canPay && hasBalance && d.status === 'validated' && balance > 0.01 && (
 												<button type="button" onClick={() => setPaying(d)}>
 													{isPurchase ? 'Régler' : 'Encaisser'}
 												</button>
@@ -455,7 +483,7 @@ export default function DocumentsPage({
 												</button>
 											)}
 											{/* Une facture validée ne s'annule pas : on émet un avoir */}
-											{d.status === 'validated' && d.kind !== 'invoice' && (
+											{canDelete && d.status === 'validated' && d.kind !== 'invoice' && (
 												<button
 													type="button"
 													onClick={() => confirm(`Annuler ${d.number} ?`) && setStatus(d, 'cancelled')}
@@ -463,7 +491,8 @@ export default function DocumentsPage({
 													Annuler
 												</button>
 											)}
-											{d.status !== 'cancelled' &&
+											{canWrite &&
+												d.status !== 'cancelled' &&
 												d.status !== 'draft' &&
 												CONVERSIONS[d.kind]
 													.filter((to) => !(d.consignment && to === 'invoice'))
@@ -472,9 +501,11 @@ export default function DocumentsPage({
 															→ {DOC_LABELS[to].title}
 														</button>
 													))}
-											<button type="button" onClick={() => duplicate(d)}>
-												Dupliquer
-											</button>
+											{canWrite && (
+												<button type="button" onClick={() => duplicate(d)}>
+													Dupliquer
+												</button>
+											)}
 										</td>
 									</tr>
 								)

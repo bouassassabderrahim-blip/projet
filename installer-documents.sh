@@ -3,8 +3,9 @@
 # À lancer à la racine du projet (dossier contenant src/)
 set -e
 [ -f src/types.ts ] || { echo "Erreur : lancez ce script dans le dossier du projet (src/types.ts introuvable)"; exit 1; }
-mkdir -p src/documents src/components src/shell
+mkdir -p src/documents src/components src/shell src/access
 for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src/types.ts; do [ -f "$f" ] && cp "$f" "$f.bak"; done; true
+
 
 
 
@@ -12,6 +13,7 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
+import { useAccess } from '../access/context'
 import { downloadFile } from './csv'
 import { LAST_BACKUP_KEY, createBackup, isBackupFile, restoreBackup } from './storage'
 import { daysBetween, frDate, today } from './numbering'
@@ -30,6 +32,7 @@ export default function BackupPage() {
   const [last, setLast] = useState(readLastBackup)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const access = useAccess()
   const age = last ? daysBetween(last, today()) : null
 
   function exportAll() {
@@ -41,6 +44,7 @@ export default function BackupPage() {
       // stockage indisponible
     }
     setLast(today())
+    access.log('Sauvegarde téléchargée', `${Object.keys(backup.data).length} jeux de données`)
     setMessage(`Sauvegarde téléchargée (${Object.keys(backup.data).length} jeux de données).`)
   }
 
@@ -83,7 +87,11 @@ export default function BackupPage() {
       <fieldset className="doc-panel">
         <legend>Restaurer</legend>
         <p>Remplace toutes les données de ce navigateur par celles d'un fichier de sauvegarde.</p>
-        <input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
+        {access.isAdmin ? (
+          <input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
+        ) : (
+          <p className="doc-warning">Seul un administrateur peut restaurer une sauvegarde.</p>
+        )}
       </fieldset>
 
       {message && <p className="doc-info">{message}</p>}
@@ -96,6 +104,7 @@ echo "OK src/documents/BackupPage.tsx"
 
 cat > src/documents/CompanySettings.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
+import { useAccess } from '../access/context'
 import DocumentPrint from './DocumentPrint'
 import { loadImage, printSettingsOf } from './printSettings'
 import type { CommercialDocument, CompanyInfo, LetterheadMode, PrintSettings } from './types'
@@ -152,6 +161,8 @@ export default function CompanySettings({ company, onChange }: Props) {
   const [draft, setDraft] = useState(company)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  const access = useAccess()
+  const canWrite = access.level('settings') === 'write'
   const print = printSettingsOf(draft)
   const iceInvalid = draft.ice !== '' && !/^\d{15}$/.test(draft.ice)
   const ribInvalid = draft.rib !== '' && !/^\d{24}$/.test(draft.rib.replace(/\s/g, ''))
@@ -181,6 +192,7 @@ export default function CompanySettings({ company, onChange }: Props) {
     try {
       onChange(draft)
       setSaved(true)
+      access.log('Paramètres société modifiés', draft.name)
     } catch {
       setError('Enregistrement impossible : images trop lourdes pour le navigateur.')
     }
@@ -196,7 +208,7 @@ export default function CompanySettings({ company, onChange }: Props) {
       <div className="doc-editor-head">
         <h2>Fiche société et mise en page</h2>
         <div className="doc-editor-actions">
-          <button type="button" className="btn-primary" disabled={iceInvalid} onClick={save}>
+          <button type="button" className="btn-primary" disabled={iceInvalid || !canWrite} onClick={save}>
             Enregistrer
           </button>
           {saved && <span className="doc-count">Enregistré ✓</span>}
@@ -357,6 +369,7 @@ echo "OK src/documents/CompanySettings.tsx"
 
 cat > src/documents/DepotPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import { addDays, daysBetween, emptyLine, frDate, newId, nextNumber, today } from './numbering'
 import { formatMAD, lineHT } from './tva'
 import { emptyIntervention, type CommercialDocument, type DocKind, type DocLine } from './types'
@@ -377,6 +390,8 @@ interface DepotItem {
 /** Implants livrés en dépôt : à facturer après la pose ou à reprendre en stock */
 export default function DepotPage({ documents, onChange, onNavigate, onStockMove }: Props) {
   const [selected, setSelected] = useState<string[]>([])
+  const access = useAccess()
+  const canWrite = access.level('sales') === 'write'
   const now = today()
 
   const groups = useMemo(() => {
@@ -426,6 +441,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
       sourceNumber: [...new Set(items.map((i) => i.bl.number))].join(', '),
     }
     onChange([...setDepot(documents, items, 'posed'), created])
+    access.log('Facturation de dépôt', `${created.number} · ${first.party.name} · ${items.length} article(s)`)
     setSelected([])
     onNavigate('invoice', id)
   }
@@ -433,6 +449,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
   function giveBack(item: DepotItem) {
     if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
     onChange(setDepot(documents, [item], 'returned'))
+    access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
     onStockMove([item.line], 1, '', `Retour dépôt ${item.bl.number}`)
   }
 
@@ -476,6 +493,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
                     <tr key={item.line.id}>
                       <td>
                         <input
+                          disabled={!canWrite}
                           type="checkbox"
                           checked={selected.includes(item.line.id)}
                           onChange={() => toggle(item.line.id)}
@@ -489,19 +507,23 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
                       <td className="num">{daysBetween(item.bl.date, now)} j</td>
                       <td className="num">{formatMAD(lineHT(item.line))}</td>
                       <td className="doc-actions">
-                        <button type="button" className="btn-primary" onClick={() => invoice([item])}>
-                          Posé → facturer
-                        </button>
-                        <button type="button" onClick={() => giveBack(item)}>
-                          Retour en stock
-                        </button>
+                        {canWrite && (
+                          <>
+                            <button type="button" className="btn-primary" onClick={() => invoice([item])}>
+                              Posé → facturer
+                            </button>
+                            <button type="button" onClick={() => giveBack(item)}>
+                              Retour en stock
+                            </button>
+                          </>
+                        )}
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-            {chosen.length > 1 && (
+            {canWrite && chosen.length > 1 && (
               <div className="doc-toolbar">
                 <button type="button" className="btn-primary" onClick={() => invoice(chosen)}>
                   Facturer les {chosen.length} articles sélectionnés
@@ -1278,6 +1300,7 @@ echo "OK src/documents/DocumentPrint.tsx"
 cat > src/documents/DocumentsPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
 import type { Product } from '../types'
+import { useAccess } from '../access/context'
 import DocumentEditor from './DocumentEditor'
 import DocumentPrint from './DocumentPrint'
 import PaymentDialog from './PaymentDialog'
@@ -1374,6 +1397,13 @@ export default function DocumentsPage({
   const [paying, setPaying] = useState<CommercialDocument | null>(null)
   const [message, setMessage] = useState<{ text: string; kind?: DocKind; id?: string } | null>(null)
   const info = DOC_LABELS[kind]
+  // Droits de l'utilisateur sur le module Ventes ou Achats
+  const access = useAccess()
+  const canWrite = access.level(info.side === 'sale' ? 'sales' : 'purchases') === 'write'
+  const canValidate = canWrite && access.can('validate')
+  const canDelete = canWrite && access.can('delete')
+  const canPay = access.can('payments')
+  const stamp = () => ({ by: access.user?.name ?? '' })
   const isPurchase = info.side === 'purchase'
   const role = isPurchase ? 'supplier' : 'client'
   const now = today()
@@ -1436,13 +1466,18 @@ export default function DocumentsPage({
 
   function save(doc: CommercialDocument) {
     const exists = documents.some((d) => d.id === doc.id)
-    onChange(exists ? documents.map((d) => (d.id === doc.id ? doc : d)) : [...documents, doc])
+    const saved = exists ? doc : { ...doc, createdBy: stamp().by }
+    onChange(exists ? documents.map((d) => (d.id === doc.id ? saved : d)) : [...documents, saved])
+    access.log(exists ? 'Pièce modifiée' : 'Pièce créée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
     rememberParty(doc)
     setView({ mode: 'list' })
   }
 
   function setStatus(doc: CommercialDocument, status: DocStatus) {
-    let next = documents.map((d) => (d.id === doc.id ? { ...d, status } : d))
+    let next = documents.map((d) =>
+      d.id === doc.id ? { ...d, status, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
+    )
+    access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
     const supplier = doc.party.name
 
     if (status === 'validated') {
@@ -1475,10 +1510,12 @@ export default function DocumentsPage({
       ),
     )
     setPaying(null)
+    access.log(isPurchase ? 'Règlement fournisseur' : 'Encaissement', `${doc.number} · ${formatMAD(payment.amount)} · ${doc.party.name}`)
   }
 
   function remove(doc: CommercialDocument) {
     if (!confirm(`Supprimer ${doc.number} ?`)) return
+    access.log('Pièce supprimée', `${DOC_LABELS[doc.kind].title} ${doc.number} · ${doc.party.name}`)
     // Facture issue d'un dépôt : les implants redeviennent « en dépôt »
     const refs = doc.lines.map((l) => l.depotRef).filter((r): r is { docId: string; lineId: string } => !!r)
     onChange(
@@ -1511,6 +1548,8 @@ export default function DocumentsPage({
         status: 'draft',
         payments: undefined,
         paidDate: undefined,
+        createdBy: undefined,
+        validatedBy: undefined,
         sourceId: undefined,
         sourceNumber: undefined,
         lines: copyLines(doc.lines),
@@ -1531,11 +1570,14 @@ export default function DocumentsPage({
       paidDate: undefined,
       consignment: undefined,
       supplierRef: to === 'bill' ? '' : undefined,
+      createdBy: stamp().by,
+      validatedBy: undefined,
       sourceId: doc.id,
       sourceNumber: doc.number,
       lines: copyLines(doc.lines),
     }
     onChange([...documents, created])
+    access.log('Pièce transformée', `${doc.number} → ${created.number}`)
     const label = DOC_LABELS[to]
     setMessage({ text: `${label.title} ${created.number} créé(e) en brouillon à partir de ${doc.number}.`, kind: to, id: created.id })
   }
@@ -1627,9 +1669,11 @@ export default function DocumentsPage({
       )}
 
       <div className="doc-toolbar">
-        <button type="button" className="btn-primary" onClick={() => setView({ mode: 'edit', doc: createDoc() })}>
-          + {info.newLabel}
-        </button>
+        {canWrite && (
+          <button type="button" className="btn-primary" onClick={() => setView({ mode: 'edit', doc: createDoc() })}>
+            + {info.newLabel}
+          </button>
+        )}
         <input
           className="doc-search"
           placeholder="Rechercher : n°, tiers, patient, lot, n° de série…"
@@ -1683,7 +1727,7 @@ export default function DocumentsPage({
                 return (
                   <tr key={d.id} className={late ? 'doc-row-late' : undefined}>
                     <td>
-                      <button type="button" className="doc-link" onClick={() => setView(d.status === 'draft' ? { mode: 'edit', doc: d } : { mode: 'print', id: d.id })}>
+                      <button type="button" className="doc-link" onClick={() => setView(d.status === 'draft' && canWrite ? { mode: 'edit', doc: d } : { mode: 'print', id: d.id })}>
                         {d.number}
                       </button>
                     </td>
@@ -1711,18 +1755,24 @@ export default function DocumentsPage({
                       </button>
                       {d.status === 'draft' && (
                         <>
-                          <button type="button" onClick={() => setView({ mode: 'edit', doc: d })}>
-                            Modifier
-                          </button>
-                          <button type="button" className="btn-primary" onClick={() => setStatus(d, 'validated')}>
-                            Valider
-                          </button>
-                          <button type="button" onClick={() => remove(d)}>
-                            Supprimer
-                          </button>
+                          {canWrite && (
+                            <button type="button" onClick={() => setView({ mode: 'edit', doc: d })}>
+                              Modifier
+                            </button>
+                          )}
+                          {canValidate && (
+                            <button type="button" className="btn-primary" onClick={() => setStatus(d, 'validated')}>
+                              Valider
+                            </button>
+                          )}
+                          {canDelete && (
+                            <button type="button" onClick={() => remove(d)}>
+                              Supprimer
+                            </button>
+                          )}
                         </>
                       )}
-                      {hasBalance && d.status === 'validated' && balance > 0.01 && (
+                      {canPay && hasBalance && d.status === 'validated' && balance > 0.01 && (
                         <button type="button" onClick={() => setPaying(d)}>
                           {isPurchase ? 'Régler' : 'Encaisser'}
                         </button>
@@ -1733,7 +1783,7 @@ export default function DocumentsPage({
                         </button>
                       )}
                       {/* Une facture validée ne s'annule pas : on émet un avoir */}
-                      {d.status === 'validated' && d.kind !== 'invoice' && (
+                      {canDelete && d.status === 'validated' && d.kind !== 'invoice' && (
                         <button
                           type="button"
                           onClick={() => confirm(`Annuler ${d.number} ?`) && setStatus(d, 'cancelled')}
@@ -1741,7 +1791,8 @@ export default function DocumentsPage({
                           Annuler
                         </button>
                       )}
-                      {d.status !== 'cancelled' &&
+                      {canWrite &&
+                        d.status !== 'cancelled' &&
                         d.status !== 'draft' &&
                         CONVERSIONS[d.kind]
                           .filter((to) => !(d.consignment && to === 'invoice'))
@@ -1750,9 +1801,11 @@ export default function DocumentsPage({
                               → {DOC_LABELS[to].title}
                             </button>
                           ))}
-                      <button type="button" onClick={() => duplicate(d)}>
-                        Dupliquer
-                      </button>
+                      {canWrite && (
+                        <button type="button" onClick={() => duplicate(d)}>
+                          Dupliquer
+                        </button>
+                      )}
                     </td>
                   </tr>
                 )
@@ -1778,6 +1831,7 @@ echo "OK src/documents/DocumentsPage.tsx"
 
 cat > src/documents/InventoryPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { downloadCsv } from './csv'
 import { frDate, newId, today } from './numbering'
@@ -1797,6 +1851,9 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
   const [query, setQuery] = useState('')
   const [onlyGaps, setOnlyGaps] = useState(false)
   const [message, setMessage] = useState('')
+  const access = useAccess()
+  const canWrite = access.level('stock') === 'write'
+  const showCosts = access.can('costs')
 
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -1841,6 +1898,7 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
         })),
     )
     setCounts({})
+    access.log('Inventaire validé', `${entered.length} article(s), écart ${formatMAD(gapValue)}`)
     setMessage(`${reference} validé : ${entered.length} article(s) mis à jour, écart ${formatMAD(gapValue)}.`)
   }
 
@@ -1854,18 +1912,22 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
   return (
     <div>
       <div className="doc-stats">
-        <div>
-          <span>Valeur du stock (coût d'achat)</span>
-          <strong>{formatMAD(stockValue)}</strong>
-        </div>
+        {showCosts && (
+          <div>
+            <span>Valeur du stock (coût d'achat)</span>
+            <strong>{formatMAD(stockValue)}</strong>
+          </div>
+        )}
         <div>
           <span>Articles avec écart</span>
           <strong>{changed.length}</strong>
         </div>
-        <div className={gapValue < 0 ? 'doc-stat-danger' : undefined}>
-          <span>Valeur des écarts</span>
-          <strong>{formatMAD(gapValue)}</strong>
-        </div>
+        {showCosts && (
+          <div className={gapValue < 0 ? 'doc-stat-danger' : undefined}>
+            <span>Valeur des écarts</span>
+            <strong>{formatMAD(gapValue)}</strong>
+          </div>
+        )}
       </div>
 
       <div className="doc-toolbar">
@@ -1876,9 +1938,11 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
         <button type="button" onClick={exportSheet}>
           Feuille de comptage (CSV)
         </button>
-        <button type="button" className="btn-primary" onClick={validate}>
-          Valider l'inventaire
-        </button>
+        {canWrite && (
+          <button type="button" className="btn-primary" onClick={validate}>
+            Valider l'inventaire
+          </button>
+        )}
       </div>
       {message && <p className="doc-info">{message}</p>}
 
@@ -1892,7 +1956,7 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
               <th className="num">Stock théorique</th>
               <th className="num">Quantité comptée</th>
               <th className="num">Écart</th>
-              <th className="num">Valeur de l'écart</th>
+              {showCosts && <th className="num">Valeur de l'écart</th>}
             </tr>
           </thead>
           <tbody>
@@ -1908,11 +1972,12 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
                     type="number"
                     min={0}
                     value={counts[r.product.id] ?? ''}
+                    readOnly={!canWrite}
                     onChange={(e) => setCounts({ ...counts, [r.product.id]: e.target.value })}
                   />
                 </td>
                 <td className="num">{r.gap === undefined ? '' : r.gap > 0 ? `+${r.gap}` : r.gap}</td>
-                <td className="num">{r.gap ? formatMAD(round2(r.gap * r.product.unitCost)) : ''}</td>
+                {showCosts && <td className="num">{r.gap ? formatMAD(round2(r.gap * r.product.unitCost)) : ''}</td>}
               </tr>
             ))}
           </tbody>
@@ -1929,6 +1994,7 @@ echo "OK src/documents/InventoryPage.tsx"
 
 cat > src/documents/KitsPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { newId } from './numbering'
 import { formatMAD, round2 } from './tva'
@@ -1945,6 +2011,7 @@ interface Props {
 export default function KitsPage({ kits, onChange, products }: Props) {
   const [editing, setEditing] = useState<Kit | null>(null)
   const [error, setError] = useState('')
+  const canWrite = useAccess().level('stock') === 'write'
   const product = (id: string) => products.find((p) => p.id === id)
   const kitPrice = (k: Kit) => round2(k.items.reduce((s, i) => s + (product(i.productId)?.unitPrice ?? 0) * i.quantity, 0))
 
@@ -2038,13 +2105,15 @@ export default function KitsPage({ kits, onChange, products }: Props) {
   return (
     <div>
       <div className="doc-toolbar">
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={() => setEditing({ id: newId(), name: '', items: [{ productId: '', quantity: 1 }] })}
-        >
-          + Nouveau kit
-        </button>
+        {canWrite && (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => setEditing({ id: newId(), name: '', items: [{ productId: '', quantity: 1 }] })}
+          >
+            + Nouveau kit
+          </button>
+        )}
         <span className="doc-count">Un kit s'insère en un clic dans un devis, un BL ou une facture.</span>
       </div>
       {kits.length === 0 ? (
@@ -2070,6 +2139,7 @@ export default function KitsPage({ kits, onChange, products }: Props) {
                 </td>
                 <td className="num">{formatMAD(kitPrice(k))}</td>
                 <td className="doc-actions">
+                  {canWrite && <>
                   <button type="button" onClick={() => setEditing(k)}>
                     Modifier
                   </button>
@@ -2079,6 +2149,7 @@ export default function KitsPage({ kits, onChange, products }: Props) {
                   >
                     Supprimer
                   </button>
+                  </>}
                 </td>
               </tr>
             ))}
@@ -2093,6 +2164,7 @@ echo "OK src/documents/KitsPage.tsx"
 
 cat > src/documents/LotsPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { frDate, newId, today } from './numbering'
 import { expiryState, type ExpiryState } from './stockMoves'
@@ -2123,6 +2195,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
   const [filter, setFilter] = useState<Filter>(initialQuery ? '' : 'available')
   const [draft, setDraft] = useState({ productId: '', lot: '', serial: '', expiry: '', quantity: '1', supplier: '' })
   const [error, setError] = useState('')
+  const canWrite = useAccess().level('stock') === 'write'
   const now = today()
   const productName = (id: string) => products.find((p) => p.id === id)?.name ?? '(article supprimé)'
 
@@ -2202,7 +2275,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
         </div>
       </div>
 
-      <div className="doc-panel">
+      {canWrite && <div className="doc-panel">
         <div className="doc-panel-title">Entrée manuelle d'un lot (stock initial)</div>
         <div className="doc-grid">
           <label>
@@ -2245,7 +2318,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
           </button>
           <span className="doc-count">Les bons de réception validés créent les lots automatiquement.</span>
         </div>
-      </div>
+      </div>}
 
       <div className="doc-toolbar">
         <input
@@ -2297,6 +2370,7 @@ export default function LotsPage({ lots, onChange, products, documents, initialQ
                       type="number"
                       min={0}
                       value={l.quantity}
+                      readOnly={!canWrite}
                       onChange={(e) => setQty(l.id, Number(e.target.value))}
                     />
                   </td>
@@ -2346,6 +2420,7 @@ echo "OK src/documents/LotsPage.tsx"
 
 cat > src/documents/PartiesPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import ReminderPrint from './ReminderPrint'
 import { balanceOf, isActive, isOverdue, sign } from './ledger'
 import { frDate, newId, today } from './numbering'
@@ -2392,6 +2467,8 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
   const [error, setError] = useState('')
   const now = today()
   const isClient = role === 'client'
+  const access = useAccess()
+  const canWrite = access.level(isClient ? 'sales' : 'purchases') === 'write'
   const side = isClient ? 'sale' : 'purchase'
 
   const rows = useMemo(() => {
@@ -2424,6 +2501,7 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
     if (duplicate) return setError('Un tiers porte déjà ce nom.')
     const rec = { ...editing, name: editing.name.trim() }
     onChange(parties.some((p) => p.id === rec.id) ? parties.map((p) => (p.id === rec.id ? rec : p)) : [...parties, rec])
+    access.log(isClient ? 'Fiche client enregistrée' : 'Fiche fournisseur enregistrée', rec.name)
     setEditing(null)
     setError('')
   }
@@ -2443,9 +2521,11 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
         <div className="doc-editor-head">
           <h2>{editing.name || (isClient ? 'Nouveau client' : 'Nouveau fournisseur')}</h2>
           <div className="doc-editor-actions">
-            <button type="button" className="btn-primary" onClick={save}>
-              Enregistrer
-            </button>
+            {canWrite && (
+              <button type="button" className="btn-primary" onClick={save}>
+                Enregistrer
+              </button>
+            )}
             <button type="button" onClick={() => setEditing(null)}>
               Fermer
             </button>
@@ -2530,13 +2610,15 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
   return (
     <div>
       <div className="doc-toolbar">
-        <button
-          type="button"
-          className="btn-primary"
-          onClick={() => setEditing({ ...emptyParty(), id: newId(), role, notes: '' })}
-        >
-          + {isClient ? 'Nouveau client' : 'Nouveau fournisseur'}
-        </button>
+        {canWrite && (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => setEditing({ ...emptyParty(), id: newId(), role, notes: '' })}
+          >
+            + {isClient ? 'Nouveau client' : 'Nouveau fournisseur'}
+          </button>
+        )}
         <input
           className="doc-search"
           placeholder="Rechercher : nom, ville, ICE, téléphone…"
@@ -2590,7 +2672,7 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
                         Lettre de relance
                       </button>
                     )}
-                    {r.docs.length === 0 && (
+                    {canWrite && r.docs.length === 0 && (
                       <button
                         type="button"
                         onClick={() =>
@@ -2916,6 +2998,7 @@ echo "OK src/documents/ReminderPrint.tsx"
 
 cat > src/documents/SchedulePage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import { downloadCsv } from './csv'
 import { balanceOf, isActive } from './ledger'
 import { addDays, daysBetween, frDate, today } from './numbering'
@@ -2971,6 +3054,7 @@ export default function SchedulePage({ documents, cash, onCashChange, onNavigate
   const now = today()
   const [cashText, setCashText] = useState(String(cash))
   const [side, setSide] = useState<'all' | 'in' | 'out'>('all')
+  const canWrite = useAccess().level('finance') === 'write'
 
   const entries = useMemo<Entry[]>(() => {
     const list: Entry[] = []
@@ -3033,7 +3117,7 @@ export default function SchedulePage({ documents, cash, onCashChange, onNavigate
       <div className="doc-stats">
         <div>
           <span>Trésorerie disponible</span>
-          <input className="num doc-cash-input" value={cashText} onChange={(e) => saveCash(e.target.value)} aria-label="Trésorerie disponible" />
+          <input className="num doc-cash-input" readOnly={!canWrite} value={cashText} onChange={(e) => saveCash(e.target.value)} aria-label="Trésorerie disponible" />
         </div>
         <div>
           <span>À encaisser (clients)</span>
@@ -3172,6 +3256,7 @@ echo "OK src/documents/SchedulePage.tsx"
 
 cat > src/documents/StatsPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { isActive, sign } from './ledger'
 import { computeTotals, formatMAD, lineHT, round2 } from './tva'
@@ -3294,6 +3379,7 @@ export default function StatsPage({ documents, products }: Props) {
   }, [documents])
   const [year, setYear] = useState(years[0])
   const [showTable, setShowTable] = useState(false)
+  const showCosts = useAccess().can('costs')
 
   const stats = useMemo(() => {
     const cost = new Map(products.map((p) => [p.id, p.unitCost]))
@@ -3382,14 +3468,18 @@ export default function StatsPage({ documents, products }: Props) {
             </small>
           )}
         </div>
-        <div>
-          <span>Marge brute</span>
-          <strong>{formatMAD(round2(stats.margin))}</strong>
-        </div>
-        <div>
-          <span>Taux de marge</span>
-          <strong>{pct(rate)}</strong>
-        </div>
+        {showCosts && (
+          <div>
+            <span>Marge brute</span>
+            <strong>{formatMAD(round2(stats.margin))}</strong>
+          </div>
+        )}
+        {showCosts && (
+          <div>
+            <span>Taux de marge</span>
+            <strong>{pct(rate)}</strong>
+          </div>
+        )}
         <div>
           <span>Factures · panier moyen HT</span>
           <strong>
@@ -3489,8 +3579,8 @@ export default function StatsPage({ documents, products }: Props) {
               <th>Article</th>
               <th className="num">Quantité</th>
               <th className="num">CA HT</th>
-              <th className="num">Marge</th>
-              <th className="num">Taux de marge</th>
+              {showCosts && <th className="num">Marge</th>}
+              {showCosts && <th className="num">Taux de marge</th>}
             </tr>
           </thead>
           <tbody>
@@ -3499,8 +3589,8 @@ export default function StatsPage({ documents, products }: Props) {
                 <td>{it.name}</td>
                 <td className="num">{it.qty}</td>
                 <td className="num">{formatMAD(round2(it.ht))}</td>
-                <td className="num">{it.costKnown ? formatMAD(round2(it.ht - it.cost)) : '—'}</td>
-                <td className="num">{it.costKnown && it.ht ? pct(((it.ht - it.cost) / it.ht) * 100) : '—'}</td>
+                {showCosts && <td className="num">{it.costKnown ? formatMAD(round2(it.ht - it.cost)) : '—'}</td>}
+                {showCosts && <td className="num">{it.costKnown && it.ht ? pct(((it.ht - it.cost) / it.ht) * 100) : '—'}</td>}
               </tr>
             ))}
           </tbody>
@@ -3515,6 +3605,7 @@ echo "OK src/documents/StatsPage.tsx"
 
 cat > src/documents/StockAlertsPage.tsx <<'FIN_DU_FICHIER'
 import { useMemo } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { getStockStatus } from '../utils/stock'
 import { addDays, emptyLine, frDate, newId, nextNumber, today } from './numbering'
@@ -3553,6 +3644,9 @@ function suggestedQty(p: Product, ordered: number): number {
 /** Alertes de stock : ruptures, articles sous le seuil, lots périmés, et réapprovisionnement */
 export default function StockAlertsPage({ products, lots, documents, onChange, onNavigate, onOpenStock }: Props) {
   const now = today()
+  const access = useAccess()
+  const canOrder = access.level('purchases') === 'write'
+  const showCosts = access.can('costs')
   const ordered = useMemo(() => onOrder(documents), [documents])
 
   const alerts = useMemo(
@@ -3613,6 +3707,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
       notes: 'Réapprovisionnement (alertes de stock)',
     }
     onChange([...documents, order])
+    access.log('Commande de réapprovisionnement', `${order.number} · ${supplier}`)
     onNavigate('purchase', id)
   }
 
@@ -3668,7 +3763,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
                   <th className="num">Seuil</th>
                   <th className="num">En commande</th>
                   <th className="num">À commander</th>
-                  <th className="num">Coût estimé HT</th>
+                  {showCosts && <th className="num">Coût estimé HT</th>}
                 </tr>
               </thead>
               <tbody>
@@ -3688,7 +3783,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
                     <td className="num">
                       <strong>{a.suggested || '—'}</strong>
                     </td>
-                    <td className="num">{a.suggested ? formatMAD(round2(a.suggested * a.product.unitCost)) : ''}</td>
+                    {showCosts && <td className="num">{a.suggested ? formatMAD(round2(a.suggested * a.product.unitCost)) : ''}</td>}
                   </tr>
                 ))}
               </tbody>
@@ -3708,7 +3803,7 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
               <tr>
                 <th>Fournisseur</th>
                 <th>Articles</th>
-                <th className="num">Montant estimé HT</th>
+                {showCosts && <th className="num">Montant estimé HT</th>}
                 <th />
               </tr>
             </thead>
@@ -3717,13 +3812,17 @@ export default function StockAlertsPage({ products, lots, documents, onChange, o
                 <tr key={supplier}>
                   <td>{supplier}</td>
                   <td>{items.map((a) => `${a.suggested} × ${a.product.name}`).join(', ')}</td>
-                  <td className="num">
-                    {formatMAD(round2(items.reduce((s, a) => s + a.suggested * a.product.unitCost, 0)))}
-                  </td>
+                  {showCosts && (
+                    <td className="num">
+                      {formatMAD(round2(items.reduce((s, a) => s + a.suggested * a.product.unitCost, 0)))}
+                    </td>
+                  )}
                   <td>
-                    <button type="button" className="btn-primary" onClick={() => createPurchase(supplier, items)}>
-                      Créer la commande fournisseur
-                    </button>
+                    {canOrder && (
+                      <button type="button" className="btn-primary" onClick={() => createPurchase(supplier, items)}>
+                        Créer la commande fournisseur
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -5396,6 +5495,9 @@ export interface CommercialDocument {
   intervention?: Intervention
   /** Numéro de la facture chez le fournisseur */
   supplierRef?: string
+  /** Traçabilité : utilisateur qui a créé et validé la pièce */
+  createdBy?: string
+  validatedBy?: string
   /** Document d'origine (ex. le BC ayant donné ce BL) */
   sourceId?: string
   sourceNumber?: string
@@ -5678,6 +5780,7 @@ import { expiryState } from '../documents/stockMoves'
 import { computeTotals, formatMAD, round2 } from '../documents/tva'
 import { DOC_LABELS, STATUS_LABELS, type CommercialDocument, type DocKind, type StockLot } from '../documents/types'
 import Icon from './icons'
+import { useAccess } from '../access/context'
 import type { ModuleId } from './navigation'
 
 interface Props {
@@ -5711,6 +5814,8 @@ const compactMAD = (v: number) =>
 export default function Launchpad({ companyName, documents, products, lots, cash, onNavigate, onOpenDocument, onCreate }: Props) {
   const now = today()
   const month = now.slice(0, 7)
+  const access = useAccess()
+  const showCosts = access.can('costs')
 
   const tiles = useMemo<Tile[]>(() => {
     let monthHT = 0
@@ -5761,7 +5866,7 @@ export default function Launchpad({ companyName, documents, products, lots, cash
     const forecast = cash + receivable - payable
 
     return [
-      { module: 'sales', title: 'CA du mois (HT)', value: compactMAD(round2(monthHT)), sub: monthHT ? `marge ${Math.round((monthMargin / monthHT) * 100)} %` : 'aucune facture ce mois', page: 'stats' },
+      { module: 'sales', title: 'CA du mois (HT)', value: compactMAD(round2(monthHT)), sub: !monthHT ? 'aucune facture ce mois' : showCosts ? `marge ${Math.round((monthMargin / monthHT) * 100)} %` : 'net des avoirs', page: 'stats' },
       { module: 'sales', title: 'Devis en cours', value: String(quotes), sub: compactMAD(round2(quotesHT)) + ' HT à transformer', page: 'quotes' },
       { module: 'sales', title: 'Factures échues', value: String(lateCount), sub: compactMAD(round2(late)) + ' à relancer', page: 'invoices', tone: lateCount ? 'danger' : 'good' },
       { module: 'sales', title: 'Implants en dépôt', value: String(depot), sub: 'chez les cliniques', page: 'depots' },
@@ -5774,11 +5879,16 @@ export default function Launchpad({ companyName, documents, products, lots, cash
       { module: 'finance', title: 'Solde prévisionnel', value: compactMAD(round2(forecast)), sub: 'trésorerie + créances − dettes', page: 'schedule', tone: forecast < 0 ? 'danger' : undefined },
       { module: 'finance', title: 'TVA du mois (estimation)', value: compactMAD(round2(monthVat)), sub: monthVat < 0 ? 'crédit de TVA' : 'collectée − déductible', page: 'vat' },
     ]
-  }, [documents, products, lots, cash, month, now])
+  }, [documents, products, lots, cash, month, now, showCosts])
+
+  const visibleTiles = tiles.filter((t) => access.level(t.module) !== 'none' && (showCosts || t.title !== 'Valeur du stock'))
+  const sideOk = (d: CommercialDocument) => access.level(DOC_LABELS[d.kind].side === 'sale' ? 'sales' : 'purchases') !== 'none'
+  const canCreate = (side: 'sales' | 'purchases') => access.level(side) === 'write'
 
   const recent = useMemo(
-    () => [...documents].sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number)).slice(0, 8),
-    [documents],
+    () => [...documents].filter(sideOk).sort((a, b) => b.date.localeCompare(a.date) || b.number.localeCompare(a.number)).slice(0, 8),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [documents, access],
   )
 
   const groups: { module: ModuleId; label: string }[] = [
@@ -5793,34 +5903,43 @@ export default function Launchpad({ companyName, documents, products, lots, cash
     <div className="erp-home">
       <div className="erp-home-head">
         <div>
-          <h2>{hour < 18 ? 'Bonjour' : 'Bonsoir'}</h2>
+          <h2>
+            {hour < 18 ? 'Bonjour' : 'Bonsoir'}
+            {access.user ? ` ${access.user.name}` : ''}
+          </h2>
           <p>
             {companyName || 'Votre dossier'} · {new Date().toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
           </p>
         </div>
         <div className="erp-quick">
-          <button type="button" className="btn-primary" onClick={() => onCreate('quote')}>
-            + Devis
-          </button>
-          <button type="button" onClick={() => onCreate('invoice')}>
-            + Facture
-          </button>
-          <button type="button" onClick={() => onCreate('delivery')}>
-            + BL
-          </button>
-          <button type="button" onClick={() => onCreate('purchase')}>
-            + Commande fournisseur
-          </button>
+          {canCreate('sales') && (
+            <>
+              <button type="button" className="btn-primary" onClick={() => onCreate('quote')}>
+                + Devis
+              </button>
+              <button type="button" onClick={() => onCreate('invoice')}>
+                + Facture
+              </button>
+              <button type="button" onClick={() => onCreate('delivery')}>
+                + BL
+              </button>
+            </>
+          )}
+          {canCreate('purchases') && (
+            <button type="button" onClick={() => onCreate('purchase')}>
+              + Commande fournisseur
+            </button>
+          )}
         </div>
       </div>
 
-      {groups.map((g) => (
+      {groups.filter((g) => visibleTiles.some((t) => t.module === g.module)).map((g) => (
         <section key={g.module} className="erp-tile-group">
           <h3>
             <Icon name={g.module} /> {g.label}
           </h3>
           <div className="erp-tiles">
-            {tiles
+            {visibleTiles
               .filter((t) => t.module === g.module)
               .map((t) => (
                 <button key={t.title} type="button" className={`erp-tile ${t.tone ? `erp-tile-${t.tone}` : ''}`} onClick={() => onNavigate(t.page)}>
@@ -5880,6 +5999,7 @@ cat > src/shell/ModuleBar.tsx <<'FIN_DU_FICHIER'
 import Icon from './icons'
 import { MODULES, type ModuleId } from './navigation'
 import type { PageId } from '../types'
+import { useAccess } from '../access/context'
 
 interface Props {
   current: ModuleId
@@ -5890,9 +6010,10 @@ interface Props {
 
 /** Ruban des modules : Accueil, Ventes, Achats, Stocks, Finance, Pilotage, Paramètres */
 export default function ModuleBar({ current, onOpen, badges }: Props) {
+  const access = useAccess()
   return (
     <nav className="erp-modules no-print" aria-label="Modules">
-      {MODULES.map((m, i) => (
+      {MODULES.map((m, i) => access.level(m.id) === 'none' ? null : (
         <button
           key={m.id}
           type="button"
@@ -5942,7 +6063,9 @@ cat > src/shell/TopBar.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import Icon from './icons'
 import type { PageId } from '../types'
-import type { DocKind } from '../documents/types'
+import { DOC_LABELS, type DocKind } from '../documents/types'
+import { useAccess } from '../access/context'
+import { ROLE_LABELS } from '../access/types'
 
 export interface Notification {
   id: string
@@ -5957,6 +6080,8 @@ interface Props {
   onSearch: () => void
   onNavigate: (page: PageId) => void
   onCreate: (kind: DocKind) => void
+  onLock: () => void
+  onLogout: () => void
 }
 
 const CREATE: { kind: DocKind; label: string }[] = [
@@ -5973,9 +6098,11 @@ const CREATE: { kind: DocKind; label: string }[] = [
 const isMac = typeof navigator !== 'undefined' && /Mac/.test(navigator.platform)
 
 /** Barre supérieure : dossier, recherche globale, création rapide, notifications */
-export default function TopBar({ companyName, notifications, onSearch, onNavigate, onCreate }: Props) {
-  const [menu, setMenu] = useState<'create' | 'notif' | null>(null)
-  const toggle = (m: 'create' | 'notif') => setMenu((cur) => (cur === m ? null : m))
+export default function TopBar({ companyName, notifications, onSearch, onNavigate, onCreate, onLock, onLogout }: Props) {
+  const [menu, setMenu] = useState<'create' | 'notif' | 'user' | null>(null)
+  const access = useAccess()
+  const creatable = CREATE.filter((c) => access.level(DOC_LABELS[c.kind].side === 'sale' ? 'sales' : 'purchases') === 'write')
+  const toggle = (m: 'create' | 'notif' | 'user') => setMenu((cur) => (cur === m ? null : m))
   const danger = notifications.filter((n) => n.severity === 'danger').length
 
   return (
@@ -5997,17 +6124,17 @@ export default function TopBar({ companyName, notifications, onSearch, onNavigat
       </button>
 
       <div className="erp-top-actions">
-        <div className="erp-menu-wrap">
+        {creatable.length > 0 && <div className="erp-menu-wrap">
           <button type="button" className="erp-create" onClick={() => toggle('create')} aria-expanded={menu === 'create'}>
             <Icon name="plus" /> Créer
           </button>
           {menu === 'create' && (
             <div className="erp-menu" onMouseLeave={() => setMenu(null)}>
-              {CREATE.map((c, i) => (
+              {creatable.map((c, i) => (
                 <button
                   key={c.kind}
                   type="button"
-                  className={i === 5 ? 'erp-menu-sep' : undefined}
+                  className={i > 0 && DOC_LABELS[c.kind].side !== DOC_LABELS[creatable[i - 1].kind].side ? 'erp-menu-sep' : undefined}
                   onClick={() => {
                     setMenu(null)
                     onCreate(c.kind)
@@ -6018,7 +6145,7 @@ export default function TopBar({ companyName, notifications, onSearch, onNavigat
               ))}
             </div>
           )}
-        </div>
+        </div>}
 
         <div className="erp-menu-wrap">
           <button
@@ -6057,9 +6184,48 @@ export default function TopBar({ companyName, notifications, onSearch, onNavigat
           )}
         </div>
 
-        <button type="button" className="erp-icon-btn" title="Paramètres" onClick={() => onNavigate('company')}>
-          <Icon name="settings" size={18} />
-        </button>
+        {access.level('settings') !== 'none' && (
+          <button type="button" className="erp-icon-btn" title="Paramètres" onClick={() => onNavigate('company')}>
+            <Icon name="settings" size={18} />
+          </button>
+        )}
+
+        {access.user ? (
+          <div className="erp-menu-wrap">
+            <button type="button" className="erp-user" onClick={() => toggle('user')} aria-expanded={menu === 'user'}>
+              <span className="login-avatar">{access.user.name.slice(0, 1).toUpperCase()}</span>
+              <span>
+                {access.user.name}
+                <small>{ROLE_LABELS[access.user.role]}</small>
+              </span>
+            </button>
+            {menu === 'user' && (
+              <div className="erp-menu" onMouseLeave={() => setMenu(null)}>
+                <div className="erp-menu-title">{access.user.login}</div>
+                {access.isAdmin && (
+                  <>
+                    <button type="button" onClick={() => { setMenu(null); onNavigate('users') }}>
+                      Utilisateurs et droits
+                    </button>
+                    <button type="button" onClick={() => { setMenu(null); onNavigate('audit') }}>
+                      Journal d'activité
+                    </button>
+                  </>
+                )}
+                <button type="button" className="erp-menu-sep" onClick={() => { setMenu(null); onLock() }}>
+                  Verrouiller la session
+                </button>
+                <button type="button" onClick={() => { setMenu(null); onLogout() }}>
+                  Se déconnecter
+                </button>
+              </div>
+            )}
+          </div>
+        ) : (
+          <button type="button" className="erp-create erp-secure" onClick={() => onNavigate('users')} title="Protéger l'accès par des comptes utilisateurs">
+            Sécuriser l'accès
+          </button>
+        )}
       </div>
     </header>
   )
@@ -6198,7 +6364,10 @@ export const MODULES: ModuleDef[] = [
   {
     id: 'settings',
     label: 'Paramètres',
-    groups: [{ title: 'Dossier', pages: ['company', 'backup'] }],
+    groups: [
+      { title: 'Dossier', pages: ['company', 'backup'] },
+      { title: 'Administration', pages: ['users', 'audit'] },
+    ],
   },
 ]
 
@@ -6236,7 +6405,12 @@ export const PAGE_LABELS: Record<PageId, string> = {
   vat: 'Déclaration de TVA',
   company: 'Société & mise en page',
   backup: 'Sauvegarde',
+  users: 'Utilisateurs & droits',
+  audit: "Journal d'activité",
 }
+
+/** Pages réservées à l'administrateur */
+export const ADMIN_PAGES: PageId[] = ['users', 'audit']
 
 export function moduleOf(page: PageId): ModuleDef {
   return MODULES.find((m) => m.groups.some((g) => g.pages.includes(page))) ?? MODULES[0]
@@ -6562,8 +6736,928 @@ body:has(.layout.erp) { margin: 0; }
 @media screen {
   .layout.erp .print-only { display: none; }
 }
+.erp-secure { background: #b45309 !important; }
+.erp-secure:hover { background: #d97706 !important; }
 FIN_DU_FICHIER
 echo "OK src/shell/shell.css"
+
+cat > src/access/AuditPage.tsx <<'FIN_DU_FICHIER'
+import { useMemo, useState } from 'react'
+import { downloadCsv } from '../documents/csv'
+import type { AuditEntry } from './types'
+import '../documents/documents.css'
+
+interface Props {
+  entries: AuditEntry[]
+}
+
+/** Journal d'activité : qui a fait quoi, et quand (réservé à l'administrateur) */
+export default function AuditPage({ entries }: Props) {
+  const [query, setQuery] = useState('')
+  const [user, setUser] = useState('')
+  const [from, setFrom] = useState('')
+  const [to, setTo] = useState('')
+  const users = useMemo(() => [...new Set(entries.map((e) => e.user))].sort(), [entries])
+
+  const rows = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    return entries
+      .filter((e) => !user || e.user === user)
+      .filter((e) => (!from || e.at.slice(0, 10) >= from) && (!to || e.at.slice(0, 10) <= to))
+      .filter((e) => !q || `${e.action} ${e.detail}`.toLowerCase().includes(q))
+      .slice()
+      .reverse()
+  }, [entries, query, user, from, to])
+
+  const fmt = (iso: string) => new Date(iso).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' })
+
+  return (
+    <div>
+      <div className="doc-toolbar">
+        <input className="doc-search" placeholder="Rechercher : action, n° de pièce, client…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <select value={user} onChange={(e) => setUser(e.target.value)}>
+          <option value="">Tous les utilisateurs</option>
+          {users.map((u) => (
+            <option key={u} value={u}>
+              {u}
+            </option>
+          ))}
+        </select>
+        <label>
+          Du <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+        </label>
+        <label>
+          au <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+        </label>
+        <button type="button" onClick={() => downloadCsv('journal-activite.csv', [['Date', 'Utilisateur', 'Action', 'Détail'], ...rows.map((e) => [fmt(e.at), e.user, e.action, e.detail])])}>
+          Exporter (CSV)
+        </button>
+        <span className="doc-count">{rows.length} action(s)</span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="doc-empty">Aucune action enregistrée.</p>
+      ) : (
+        <div className="doc-table-wrap">
+          <table className="doc-table">
+            <thead>
+              <tr>
+                <th>Date et heure</th>
+                <th>Utilisateur</th>
+                <th>Action</th>
+                <th>Détail</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((e) => (
+                <tr key={e.id}>
+                  <td>{fmt(e.at)}</td>
+                  <td>{e.user}</td>
+                  <td>
+                    <strong>{e.action}</strong>
+                  </td>
+                  <td>{e.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/access/AuditPage.tsx"
+
+cat > src/access/LoginScreen.tsx <<'FIN_DU_FICHIER'
+import { useState, type FormEvent } from 'react'
+import { hashPin } from './crypto'
+import { ROLE_LABELS, type User } from './types'
+import './access.css'
+
+interface Props {
+  users: User[]
+  companyName: string
+  logo?: string
+  /** Écran de verrouillage : l'utilisateur est déjà choisi */
+  lockedUser?: User
+  onLogin: (user: User) => void
+}
+
+const MAX_TRIES = 5
+const COOLDOWN_MS = 30_000
+
+/** Connexion par utilisateur et code PIN */
+export default function LoginScreen({ users, companyName, logo, lockedUser, onLogin }: Props) {
+  const active = users.filter((u) => u.active)
+  const [selected, setSelected] = useState<User | null>(lockedUser ?? (active.length === 1 ? active[0] : null))
+  const [pin, setPin] = useState('')
+  const [error, setError] = useState('')
+  const [tries, setTries] = useState(0)
+  const [blockedUntil, setBlockedUntil] = useState(0)
+
+  async function submit(e: FormEvent) {
+    e.preventDefault()
+    if (!selected) return
+    if (Date.now() < blockedUntil) return setError('Trop de tentatives : patientez 30 secondes.')
+    const hash = await hashPin(pin, selected.salt)
+    if (hash === selected.pinHash) return onLogin(selected)
+    const n = tries + 1
+    setTries(n)
+    setPin('')
+    if (n >= MAX_TRIES) {
+      setBlockedUntil(Date.now() + COOLDOWN_MS)
+      setTries(0)
+      setError('Code incorrect. Trop de tentatives : patientez 30 secondes.')
+    } else setError(`Code incorrect (${MAX_TRIES - n} essai(s) restant(s)).`)
+  }
+
+  return (
+    <div className="login-screen">
+      <div className="login-card">
+        <div className="login-head">
+          {logo ? <img src={logo} alt="" className="login-logo" /> : <span className="erp-logo">PP</span>}
+          <div>
+            <strong>ProfitPilot ERP</strong>
+            <span>{companyName || 'Gestion commerciale'}</span>
+          </div>
+        </div>
+
+        {!selected ? (
+          <>
+            <p className="login-title">Qui êtes-vous ?</p>
+            <div className="login-users">
+              {active.map((u) => (
+                <button key={u.id} type="button" className="login-user" onClick={() => setSelected(u)}>
+                  <span className="login-avatar">{u.name.slice(0, 1).toUpperCase()}</span>
+                  <span>
+                    <strong>{u.name}</strong>
+                    <small>{ROLE_LABELS[u.role]}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </>
+        ) : (
+          <form onSubmit={submit}>
+            <p className="login-title">{lockedUser ? 'Session verrouillée' : 'Saisissez votre code'}</p>
+            <div className="login-user login-user-selected">
+              <span className="login-avatar">{selected.name.slice(0, 1).toUpperCase()}</span>
+              <span>
+                <strong>{selected.name}</strong>
+                <small>{ROLE_LABELS[selected.role]}</small>
+              </span>
+            </div>
+            <input
+              className="login-pin"
+              type="password"
+              inputMode="numeric"
+              autoComplete="current-password"
+              placeholder="Code PIN"
+              value={pin}
+              autoFocus
+              onChange={(e) => {
+                setPin(e.target.value.replace(/\D/g, '').slice(0, 8))
+                setError('')
+              }}
+            />
+            {error && <p className="login-error">{error}</p>}
+            <button type="submit" className="login-submit" disabled={pin.length < 4}>
+              {lockedUser ? 'Déverrouiller' : 'Se connecter'}
+            </button>
+            {!lockedUser && active.length > 1 && (
+              <button type="button" className="login-back" onClick={() => setSelected(null)}>
+                ← Changer d'utilisateur
+              </button>
+            )}
+            {lockedUser && (
+              <button type="button" className="login-back" onClick={() => setSelected(null)}>
+                Se connecter avec un autre compte
+              </button>
+            )}
+          </form>
+        )}
+        <p className="login-foot">Le code PIN est demandé à chaque ouverture et après une période d'inactivité.</p>
+      </div>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/access/LoginScreen.tsx"
+
+cat > src/access/ReadOnly.tsx <<'FIN_DU_FICHIER'
+import type { ReactNode } from 'react'
+
+/** Écran en lecture seule : bandeau d'information et champs désactivés si demandé */
+export function ReadOnlyArea({ readOnly, lock, children }: { readOnly: boolean; lock: boolean; children: ReactNode }) {
+  if (!readOnly) return <>{children}</>
+  return (
+    <>
+      <p className="access-readonly-banner no-print">Lecture seule : vos droits ne permettent pas de modifier cet écran.</p>
+      {lock ? (
+        <fieldset disabled className="access-readonly">
+          {children}
+        </fieldset>
+      ) : (
+        children
+      )}
+    </>
+  )
+}
+
+export function AccessDenied() {
+  return (
+    <div className="access-denied">
+      <strong>Accès non autorisé</strong>
+      Vos droits ne permettent pas d'ouvrir cet écran. Demandez à l'administrateur de modifier votre profil.
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/access/ReadOnly.tsx"
+
+cat > src/access/UsersPage.tsx <<'FIN_DU_FICHIER'
+import { useState } from 'react'
+import { useAccess } from './context'
+import { hashPin, isValidPin, newSalt } from './crypto'
+import {
+  ACTIONS,
+  ROLES,
+  ROLE_LABELS,
+  SECURED_MODULES,
+  rolePermissions,
+  type AccessSettings,
+  type Level,
+  type Permissions,
+  type RoleId,
+  type User,
+} from './types'
+import { frDate, newId } from '../documents/numbering'
+import '../documents/documents.css'
+import './access.css'
+
+interface Props {
+  users: User[]
+  onChange: (users: User[]) => void
+  settings: AccessSettings
+  onSettingsChange: (settings: AccessSettings) => void
+  /** Après création du premier administrateur : ouverture de sa session */
+  onFirstAdmin: (user: User) => void
+}
+
+const LEVELS: { id: Level; label: string }[] = [
+  { id: 'none', label: 'Aucun' },
+  { id: 'read', label: 'Lecture' },
+  { id: 'write', label: 'Modification' },
+]
+
+interface Draft {
+  id: string
+  name: string
+  login: string
+  role: RoleId
+  permissions: Permissions
+  active: boolean
+  pin: string
+  pin2: string
+  isNew: boolean
+}
+
+/** Gestion des utilisateurs et de leurs droits (réservée à l'administrateur) */
+export default function UsersPage({ users, onChange, settings, onSettingsChange, onFirstAdmin }: Props) {
+  const access = useAccess()
+  const firstRun = users.length === 0
+  const [draft, setDraft] = useState<Draft | null>(() =>
+    firstRun
+      ? { id: newId(), name: '', login: 'admin', role: 'admin', permissions: rolePermissions('admin'), active: true, pin: '', pin2: '', isNew: true }
+      : null,
+  )
+  const [error, setError] = useState('')
+
+  const admins = users.filter((u) => u.role === 'admin' && u.active)
+
+  function edit(u: User) {
+    setDraft({ id: u.id, name: u.name, login: u.login, role: u.role, permissions: structuredClone(u.permissions), active: u.active, pin: '', pin2: '', isNew: false })
+    setError('')
+  }
+
+  function setRole(role: RoleId) {
+    if (!draft) return
+    setDraft({ ...draft, role, permissions: role === 'custom' ? draft.permissions : rolePermissions(role) })
+  }
+
+  async function save() {
+    if (!draft) return
+    const name = draft.name.trim()
+    const login = draft.login.trim().toLowerCase()
+    if (!name) return setError('Indiquez le nom.')
+    if (!/^[a-z0-9._-]{2,30}$/.test(login)) return setError('Identifiant : 2 à 30 caractères (lettres, chiffres, . _ -).')
+    if (users.some((u) => u.id !== draft.id && u.login === login)) return setError('Cet identifiant est déjà utilisé.')
+    if (draft.isNew || draft.pin) {
+      if (!isValidPin(draft.pin)) return setError('Le code PIN doit comporter 4 à 8 chiffres.')
+      if (draft.pin !== draft.pin2) return setError('Les deux codes PIN ne correspondent pas.')
+    }
+    const old = users.find((u) => u.id === draft.id)
+    // On garde toujours au moins un administrateur actif
+    const removesLastAdmin = old?.role === 'admin' && admins.length === 1 && (draft.role !== 'admin' || !draft.active)
+    if (removesLastAdmin) return setError('Il doit rester au moins un administrateur actif.')
+
+    const salt = draft.pin ? newSalt() : (old?.salt ?? newSalt())
+    const pinHash = draft.pin ? await hashPin(draft.pin, salt) : (old?.pinHash ?? '')
+    const user: User = {
+      id: draft.id,
+      name,
+      login,
+      role: draft.role,
+      permissions: draft.role === 'admin' ? rolePermissions('admin') : draft.permissions,
+      active: draft.active,
+      salt,
+      pinHash,
+      createdAt: old?.createdAt ?? new Date().toISOString(),
+      lastLogin: old?.lastLogin,
+    }
+    onChange(old ? users.map((u) => (u.id === user.id ? user : u)) : [...users, user])
+    access.log(old ? 'Utilisateur modifié' : 'Utilisateur créé', `${name} (${ROLE_LABELS[user.role]})${draft.pin && old ? ', code PIN changé' : ''}`)
+    setDraft(null)
+    setError('')
+    if (firstRun) onFirstAdmin(user)
+  }
+
+  function remove(u: User) {
+    if (u.role === 'admin' && admins.length === 1) return setError('Impossible de supprimer le dernier administrateur.')
+    if (u.id === access.user?.id) return setError('Vous ne pouvez pas supprimer votre propre compte.')
+    if (!confirm(`Supprimer le compte de ${u.name} ?`)) return
+    onChange(users.filter((x) => x.id !== u.id))
+    access.log('Utilisateur supprimé', u.name)
+  }
+
+  if (draft) {
+    const isAdminRole = draft.role === 'admin'
+    const setModule = (m: keyof Permissions['modules'], level: Level) =>
+      setDraft({ ...draft, role: 'custom', permissions: { ...draft.permissions, modules: { ...draft.permissions.modules, [m]: level } } })
+    const setAction = (a: keyof Permissions['actions'], on: boolean) =>
+      setDraft({ ...draft, role: 'custom', permissions: { ...draft.permissions, actions: { ...draft.permissions.actions, [a]: on } } })
+    return (
+      <div>
+        {firstRun && (
+          <p className="doc-info">
+            Créez d'abord le compte <strong>administrateur</strong>. Ensuite, l'application demandera un code PIN à chaque
+            ouverture et vous pourrez créer les comptes de vos employés.
+          </p>
+        )}
+        <div className="doc-editor-head">
+          <h2>{draft.isNew ? (firstRun ? 'Compte administrateur' : 'Nouvel utilisateur') : draft.name}</h2>
+          <div className="doc-editor-actions">
+            <button type="button" className="btn-primary" onClick={save}>
+              Enregistrer
+            </button>
+            {!firstRun && (
+              <button type="button" onClick={() => setDraft(null)}>
+                Fermer
+              </button>
+            )}
+          </div>
+        </div>
+
+        <fieldset className="doc-panel">
+          <legend>Identité et connexion</legend>
+          <div className="doc-grid">
+            <label>
+              Nom affiché
+              <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="ex. Karim Bennani" />
+            </label>
+            <label>
+              Identifiant
+              <input value={draft.login} onChange={(e) => setDraft({ ...draft, login: e.target.value })} />
+            </label>
+            <label>
+              {draft.isNew ? 'Code PIN (4 à 8 chiffres)' : 'Nouveau code PIN (laisser vide pour garder)'}
+              <input type="password" inputMode="numeric" value={draft.pin} onChange={(e) => setDraft({ ...draft, pin: e.target.value.replace(/\D/g, '').slice(0, 8) })} />
+            </label>
+            <label>
+              Confirmer le code PIN
+              <input type="password" inputMode="numeric" value={draft.pin2} onChange={(e) => setDraft({ ...draft, pin2: e.target.value.replace(/\D/g, '').slice(0, 8) })} />
+            </label>
+            {!firstRun && (
+              <label className="doc-check">
+                <input type="checkbox" checked={draft.active} onChange={(e) => setDraft({ ...draft, active: e.target.checked })} />
+                Compte actif
+              </label>
+            )}
+          </div>
+        </fieldset>
+
+        {!firstRun && (
+          <fieldset className="doc-panel">
+            <legend>Profil et droits</legend>
+            <div className="access-roles">
+              {ROLES.map((r) => (
+                <label key={r.id} className={`doc-mode ${draft.role === r.id ? 'doc-mode-active' : ''}`}>
+                  <input type="radio" name="role" checked={draft.role === r.id} onChange={() => setRole(r.id)} />
+                  <span>
+                    <strong>{r.label}</strong>
+                    <small>{r.description}</small>
+                  </span>
+                </label>
+              ))}
+              <label className={`doc-mode ${draft.role === 'custom' ? 'doc-mode-active' : ''}`}>
+                <input type="radio" name="role" checked={draft.role === 'custom'} onChange={() => setRole('custom')} />
+                <span>
+                  <strong>Personnalisé</strong>
+                  <small>Réglez chaque droit ci-dessous</small>
+                </span>
+              </label>
+            </div>
+
+            {isAdminRole ? (
+              <p className="doc-info">L'administrateur a tous les droits, gère les utilisateurs et consulte le journal d'activité.</p>
+            ) : (
+              <div className="access-matrix">
+                <table className="doc-table">
+                  <thead>
+                    <tr>
+                      <th>Module</th>
+                      {LEVELS.map((l) => (
+                        <th key={l.id} className="access-center">
+                          {l.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {SECURED_MODULES.map((m) => (
+                      <tr key={m.id}>
+                        <td>{m.label}</td>
+                        {LEVELS.map((l) => (
+                          <td key={l.id} className="access-center">
+                            <input
+                              type="radio"
+                              name={`mod-${m.id}`}
+                              aria-label={`${m.label} : ${l.label}`}
+                              checked={draft.permissions.modules[m.id] === l.id}
+                              onChange={() => setModule(m.id, l.id)}
+                            />
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div className="access-actions">
+                  <strong>Actions autorisées</strong>
+                  {ACTIONS.map((a) => (
+                    <label key={a.id} className="doc-check">
+                      <input type="checkbox" checked={draft.permissions.actions[a.id]} onChange={(e) => setAction(a.id, e.target.checked)} />
+                      <span>
+                        {a.label} <small>({a.hint})</small>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </fieldset>
+        )}
+        {error && <p className="doc-error">{error}</p>}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div className="doc-toolbar">
+        <button
+          type="button"
+          className="btn-primary"
+          onClick={() =>
+            setDraft({ id: newId(), name: '', login: '', role: 'sales', permissions: rolePermissions('sales'), active: true, pin: '', pin2: '', isNew: true })
+          }
+        >
+          + Nouvel utilisateur
+        </button>
+        <label>
+          Verrouillage automatique après{' '}
+          <select value={settings.lockMinutes} onChange={(e) => onSettingsChange({ lockMinutes: Number(e.target.value) })}>
+            {[0, 5, 10, 15, 30, 60].map((m) => (
+              <option key={m} value={m}>
+                {m === 0 ? 'jamais' : `${m} min d'inactivité`}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="doc-count">{users.length} compte(s)</span>
+      </div>
+      {error && <p className="doc-error">{error}</p>}
+
+      <table className="doc-table">
+        <thead>
+          <tr>
+            <th>Nom</th>
+            <th>Identifiant</th>
+            <th>Profil</th>
+            {SECURED_MODULES.map((m) => (
+              <th key={m.id} className="access-center">
+                {m.label}
+              </th>
+            ))}
+            <th>Dernière connexion</th>
+            <th>État</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {users.map((u) => (
+            <tr key={u.id}>
+              <td>
+                <button type="button" className="doc-link" onClick={() => edit(u)}>
+                  {u.name}
+                </button>
+                {u.id === access.user?.id && <small> (vous)</small>}
+              </td>
+              <td>{u.login}</td>
+              <td>{ROLE_LABELS[u.role]}</td>
+              {SECURED_MODULES.map((m) => {
+                const level = u.role === 'admin' ? 'write' : u.permissions.modules[m.id]
+                return (
+                  <td key={m.id} className="access-center">
+                    <span className={`access-level access-${level}`}>{level === 'write' ? 'M' : level === 'read' ? 'L' : '—'}</span>
+                  </td>
+                )
+              })}
+              <td>{u.lastLogin ? `${frDate(u.lastLogin.slice(0, 10))} ${u.lastLogin.slice(11, 16)}` : 'jamais'}</td>
+              <td>
+                <span className={`doc-badge ${u.active ? 'doc-badge-paid' : 'doc-badge-cancelled'}`}>{u.active ? 'Actif' : 'Désactivé'}</span>
+              </td>
+              <td className="doc-actions">
+                <button type="button" onClick={() => edit(u)}>
+                  Modifier
+                </button>
+                <button type="button" onClick={() => remove(u)}>
+                  Supprimer
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <p className="doc-count">M = modification · L = lecture seule · — = pas d'accès. Les changements de droits s'appliquent immédiatement.</p>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/access/UsersPage.tsx"
+
+cat > src/access/access.css <<'FIN_DU_FICHIER'
+/* ---------- Connexion ---------- */
+.login-screen {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(160deg, #13293d 0%, #1f4e79 60%, #2b6cb0 100%);
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  z-index: 200;
+}
+.login-card {
+  width: min(420px, calc(100vw - 32px));
+  padding: 26px 28px 20px;
+  background: #fff;
+  border-radius: 8px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  color: #1e293b;
+}
+.login-head { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
+.login-head .erp-logo { width: 40px; height: 40px; font-size: 15px; color: #fff; }
+.login-head strong { display: block; font-size: 17px; color: #1f4e79; }
+.login-head span { font-size: 13px; color: #5b6b7d; }
+.login-logo { max-height: 44px; max-width: 120px; object-fit: contain; }
+.login-title { margin: 0 0 10px; font-weight: 600; }
+.login-users { display: flex; flex-direction: column; gap: 6px; max-height: 50vh; overflow-y: auto; }
+.login-user {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  background: #f6f8fa;
+  border: 1px solid #d5dce4;
+  border-radius: 6px;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+}
+.login-user:hover { border-color: #2b6cb0; background: #eef5fc; }
+.login-user span:last-child { display: flex; flex-direction: column; }
+.login-user small { color: #5b6b7d; }
+.login-user-selected { cursor: default; margin-bottom: 12px; }
+.login-avatar {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #2b6cb0;
+  color: #fff;
+  font-weight: 700;
+}
+.login-pin {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 12px;
+  font-size: 22px;
+  letter-spacing: 8px;
+  text-align: center;
+  border: 1px solid #aebbc9;
+  border-radius: 6px;
+}
+.login-pin:focus { outline: none; border-color: #2b6cb0; box-shadow: 0 0 0 3px rgba(43, 108, 176, 0.2); }
+.login-error { color: #b42318; font-size: 13px; margin: 8px 0 0; }
+.login-submit {
+  width: 100%;
+  margin-top: 12px;
+  padding: 10px;
+  border: 0;
+  border-radius: 6px;
+  background: #2b6cb0;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.login-submit:disabled { opacity: 0.5; cursor: not-allowed; }
+.login-back { width: 100%; margin-top: 8px; background: none; border: 0; color: #2b6cb0; cursor: pointer; font: inherit; }
+.login-foot { margin: 16px 0 0; font-size: 11.5px; color: #8a97a6; text-align: center; }
+
+/* ---------- Droits ---------- */
+.access-roles { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px; margin-bottom: 12px; }
+.access-matrix { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(260px, 1fr); gap: 16px; align-items: start; }
+.access-actions { display: flex; flex-direction: column; gap: 8px; }
+.access-actions small { color: var(--pp-muted); }
+.access-center { text-align: center !important; }
+.access-level { display: inline-block; min-width: 22px; padding: 1px 5px; border-radius: 2px; font-size: 11px; font-weight: 700; }
+.access-write { background: #dcfce7; color: #166534; }
+.access-read { background: #e0ecfb; color: #1e40af; }
+.access-none { color: #94a3b8; }
+
+/* ---------- Lecture seule et accès refusé ---------- */
+.access-readonly-banner {
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  background: #eef4ff;
+  border: 1px solid #a4bcfd;
+  border-left: 4px solid #2b6cb0;
+  border-radius: 3px;
+  font-size: 12.5px;
+  color: #1e3a8a;
+}
+fieldset.access-readonly { border: 0; padding: 0; margin: 0; min-width: 0; }
+.access-denied { margin-top: 40px; text-align: center; color: var(--pp-muted); }
+.access-denied strong { display: block; font-size: 16px; color: var(--pp-text); margin-bottom: 6px; }
+
+/* ---------- Menu utilisateur ---------- */
+.erp-user { display: flex; align-items: center; gap: 8px; padding: 3px 8px !important; border-radius: 4px; }
+.erp-user:hover { background: #1e3a52 !important; }
+.erp-user .login-avatar { width: 26px; height: 26px; font-size: 12px; }
+.erp-user small { display: block; font-size: 10.5px; color: #93a5b8; }
+.erp-user span:last-child { text-align: left; line-height: 1.15; }
+FIN_DU_FICHIER
+echo "OK src/access/access.css"
+
+cat > src/access/context.ts <<'FIN_DU_FICHIER'
+import { createContext, useContext } from 'react'
+import type { ModuleId } from '../shell/navigation'
+import type { Action, Level, User } from './types'
+
+export interface Access {
+  /** Utilisateur connecté (null tant qu'aucun compte n'a été créé) */
+  user: User | null
+  isAdmin: boolean
+  level: (module: ModuleId) => Level
+  can: (action: Action) => boolean
+  /** Trace une action dans le journal d'activité */
+  log: (action: string, detail: string) => void
+}
+
+/** Sans compte utilisateur, tout est permis (première installation) */
+export const FULL_ACCESS: Access = {
+  user: null,
+  isAdmin: true,
+  level: () => 'write',
+  can: () => true,
+  log: () => {},
+}
+
+export const AccessContext = createContext<Access>(FULL_ACCESS)
+
+export const useAccess = () => useContext(AccessContext)
+
+/** Droits de l'utilisateur sur un module */
+export function accessFor(user: User | null, log: Access['log']): Access {
+  if (!user) return { ...FULL_ACCESS, log }
+  const isAdmin = user.role === 'admin'
+  return {
+    user,
+    isAdmin,
+    level: (module) => (module === 'home' || isAdmin ? 'write' : user.permissions.modules[module]),
+    can: (action) => isAdmin || user.permissions.actions[action],
+    log,
+  }
+}
+FIN_DU_FICHIER
+echo "OK src/access/context.ts"
+
+cat > src/access/crypto.ts <<'FIN_DU_FICHIER'
+/** Empreinte du code PIN (SHA-256 salé) : le code lui-même n'est jamais enregistré */
+export async function hashPin(pin: string, salt: string): Promise<string> {
+  const data = new TextEncoder().encode(`${salt}:${pin}`)
+  if (globalThis.crypto?.subtle) {
+    const digest = await crypto.subtle.digest('SHA-256', data)
+    return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('')
+  }
+  // Navigateur sans crypto.subtle (page non sécurisée) : empreinte FNV-1a, moins robuste
+  let h = 0x811c9dc5
+  for (const byte of data) h = Math.imul(h ^ byte, 0x01000193) >>> 0
+  return 'fnv-' + h.toString(16)
+}
+
+export function newSalt(): string {
+  const bytes = new Uint8Array(16)
+  globalThis.crypto?.getRandomValues?.(bytes)
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('') || Math.random().toString(36).slice(2)
+}
+
+export const isValidPin = (pin: string) => /^\d{4,8}$/.test(pin)
+FIN_DU_FICHIER
+echo "OK src/access/crypto.ts"
+
+cat > src/access/storage.ts <<'FIN_DU_FICHIER'
+import { usePersistentState } from '../documents/storage'
+import type { AccessSettings, AuditEntry, User } from './types'
+
+export const USERS_KEY = 'profitpilot:users:v1'
+export const AUDIT_KEY = 'profitpilot:audit:v1'
+export const ACCESS_KEY = 'profitpilot:access:v1'
+/** Session ouverte : effacée à la fermeture de l'onglet */
+export const SESSION_KEY = 'profitpilot:session'
+
+const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null
+
+const isUserList = (x: unknown): x is User[] =>
+  Array.isArray(x) &&
+  x.every((u) => isObj(u) && typeof u.id === 'string' && typeof u.pinHash === 'string' && isObj(u.permissions))
+
+const isAuditList = (x: unknown): x is AuditEntry[] =>
+  Array.isArray(x) && x.every((e) => isObj(e) && typeof e.id === 'string' && typeof e.action === 'string')
+
+const isSettings = (x: unknown): x is AccessSettings => isObj(x) && typeof x.lockMinutes === 'number'
+
+export const useUsers = () => usePersistentState<User[]>(USERS_KEY, () => [], isUserList)
+export const useAudit = () => usePersistentState<AuditEntry[]>(AUDIT_KEY, () => [], isAuditList)
+export const useAccessSettings = () => usePersistentState<AccessSettings>(ACCESS_KEY, () => ({ lockMinutes: 15 }), isSettings)
+
+export function readSession(): string | null {
+  try {
+    return sessionStorage.getItem(SESSION_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function writeSession(userId: string | null) {
+  try {
+    if (userId) sessionStorage.setItem(SESSION_KEY, userId)
+    else sessionStorage.removeItem(SESSION_KEY)
+  } catch {
+    // stockage indisponible
+  }
+}
+FIN_DU_FICHIER
+echo "OK src/access/storage.ts"
+
+cat > src/access/types.ts <<'FIN_DU_FICHIER'
+import type { ModuleId } from '../shell/navigation'
+
+/** Niveau d'accès à un module */
+export type Level = 'none' | 'read' | 'write'
+
+/** Modules soumis à droits (l'accueil est toujours visible) */
+export type SecuredModule = Exclude<ModuleId, 'home'>
+
+export const SECURED_MODULES: { id: SecuredModule; label: string }[] = [
+  { id: 'sales', label: 'Ventes' },
+  { id: 'purchases', label: 'Achats' },
+  { id: 'stock', label: 'Stocks' },
+  { id: 'finance', label: 'Finance' },
+  { id: 'analysis', label: 'Pilotage' },
+  { id: 'settings', label: 'Paramètres' },
+]
+
+export type Action = 'validate' | 'payments' | 'delete' | 'costs'
+
+export const ACTIONS: { id: Action; label: string; hint: string }[] = [
+  { id: 'validate', label: 'Valider les pièces', hint: 'devis, BL, factures, réceptions…' },
+  { id: 'payments', label: 'Saisir les règlements', hint: 'encaissements clients et paiements fournisseurs' },
+  { id: 'delete', label: 'Supprimer des brouillons', hint: 'et annuler des pièces validées' },
+  { id: 'costs', label: 'Voir les coûts et les marges', hint: "prix d'achat, marges, valeur du stock" },
+]
+
+export interface Permissions {
+  modules: Record<SecuredModule, Level>
+  actions: Record<Action, boolean>
+}
+
+export type RoleId = 'admin' | 'sales' | 'warehouse' | 'accountant' | 'viewer' | 'custom'
+
+export interface User {
+  id: string
+  name: string
+  login: string
+  role: RoleId
+  pinHash: string
+  salt: string
+  active: boolean
+  permissions: Permissions
+  createdAt: string
+  lastLogin?: string
+}
+
+export interface AuditEntry {
+  id: string
+  at: string // date ISO
+  user: string
+  action: string
+  detail: string
+}
+
+export interface AccessSettings {
+  /** Verrouillage automatique après inactivité (minutes, 0 = jamais) */
+  lockMinutes: number
+}
+
+const all = (level: Level): Record<SecuredModule, Level> => ({
+  sales: level,
+  purchases: level,
+  stock: level,
+  finance: level,
+  analysis: level,
+  settings: level,
+})
+
+/** Profils types, modifiables ensuite utilisateur par utilisateur */
+export const ROLES: { id: RoleId; label: string; description: string; permissions: Permissions }[] = [
+  {
+    id: 'admin',
+    label: 'Administrateur',
+    description: 'Accès complet, gestion des utilisateurs et du journal',
+    permissions: { modules: all('write'), actions: { validate: true, payments: true, delete: true, costs: true } },
+  },
+  {
+    id: 'sales',
+    label: 'Commercial',
+    description: 'Devis, commandes, BL et factures ; consulte le stock',
+    permissions: {
+      modules: { ...all('none'), sales: 'write', stock: 'read' },
+      actions: { validate: true, payments: false, delete: true, costs: false },
+    },
+  },
+  {
+    id: 'warehouse',
+    label: 'Magasinier',
+    description: 'Stock, lots, réceptions, BL et dépôts',
+    permissions: {
+      modules: { ...all('none'), sales: 'read', purchases: 'write', stock: 'write' },
+      actions: { validate: true, payments: false, delete: false, costs: false },
+    },
+  },
+  {
+    id: 'accountant',
+    label: 'Comptable',
+    description: 'Factures, règlements, achats, trésorerie et TVA',
+    permissions: {
+      modules: { ...all('read'), sales: 'write', purchases: 'write', finance: 'write', settings: 'none' },
+      actions: { validate: true, payments: true, delete: false, costs: true },
+    },
+  },
+  {
+    id: 'viewer',
+    label: 'Consultation',
+    description: 'Voit tout, ne modifie rien',
+    permissions: { modules: { ...all('read'), settings: 'none' }, actions: { validate: false, payments: false, delete: false, costs: false } },
+  },
+]
+
+export const ROLE_LABELS: Record<RoleId, string> = {
+  admin: 'Administrateur',
+  sales: 'Commercial',
+  warehouse: 'Magasinier',
+  accountant: 'Comptable',
+  viewer: 'Consultation',
+  custom: 'Personnalisé',
+}
+
+export const rolePermissions = (role: RoleId): Permissions =>
+  structuredClone((ROLES.find((r) => r.id === role) ?? ROLES[ROLES.length - 1]).permissions)
+FIN_DU_FICHIER
+echo "OK src/access/types.ts"
 
 cat > src/pro-theme.css <<'FIN_DU_FICHIER'
 /*
@@ -6760,7 +7854,8 @@ echo "OK src/pro-theme.css"
 
 cat > src/components/Sidebar.tsx <<'FIN_DU_FICHIER'
 import type { PageId } from '../types'
-import { PAGE_LABELS, type ModuleDef } from '../shell/navigation'
+import { ADMIN_PAGES, PAGE_LABELS, type ModuleDef } from '../shell/navigation'
+import { useAccess } from '../access/context'
 
 interface SidebarProps {
   module: ModuleDef
@@ -6772,14 +7867,18 @@ interface SidebarProps {
 
 /** Menu du module en cours, rubrique par rubrique */
 export default function Sidebar({ module, current, onNavigate, badges }: SidebarProps) {
+  const { isAdmin } = useAccess()
   return (
     <aside className="sidebar no-print">
       <div className="brand">{module.label}</div>
       <nav>
-        {module.groups.map((group) => (
+        {module.groups.map((group) => {
+          const pages = group.pages.filter((id) => isAdmin || !ADMIN_PAGES.includes(id))
+          if (pages.length === 0) return null
+          return (
           <div key={group.title}>
             <div className="nav-section-title">{group.title}</div>
-            {group.pages.map((id) => {
+            {pages.map((id) => {
               const badge = badges?.[id]
               return (
                 <button
@@ -6793,7 +7892,8 @@ export default function Sidebar({ module, current, onNavigate, badges }: Sidebar
               )
             })}
           </div>
-        ))}
+          )
+        })}
       </nav>
     </aside>
   )
@@ -7076,7 +8176,7 @@ FIN_DU_FICHIER
 echo "OK src/components/Dashboard.tsx"
 
 cat > src/App.tsx <<'FIN_DU_FICHIER'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FixedCost, PageId, Product } from './types'
 import { sampleProducts } from './data/sampleProducts'
 import Sidebar from './components/Sidebar'
@@ -7116,9 +8216,16 @@ import WorkTabs from './shell/WorkTabs'
 import StatusBar from './shell/StatusBar'
 import GlobalSearch, { type SearchHit } from './shell/GlobalSearch'
 import Launchpad from './shell/Launchpad'
-import { MODULES, moduleOf, type ModuleId } from './shell/navigation'
+import { ADMIN_PAGES, MODULES, moduleOf, type ModuleId } from './shell/navigation'
 import { LAST_BACKUP_KEY } from './documents/storage'
-import { daysBetween, today } from './documents/numbering'
+import { AccessContext, accessFor } from './access/context'
+import { readSession, useAccessSettings, useAudit, useUsers, writeSession } from './access/storage'
+import type { AuditEntry, User } from './access/types'
+import LoginScreen from './access/LoginScreen'
+import UsersPage from './access/UsersPage'
+import AuditPage from './access/AuditPage'
+import { AccessDenied, ReadOnlyArea } from './access/ReadOnly'
+import { daysBetween, newId, today } from './documents/numbering'
 import './theme.css'
 import './documents/documents.css'
 import './pro-theme.css'
@@ -7161,6 +8268,8 @@ const titles: Record<PageId, string> = {
   vat: 'Déclaration de TVA',
   company: 'Société et mise en page des documents',
   backup: 'Sauvegarde des données',
+  users: 'Utilisateurs et droits d’accès',
+  audit: 'Journal d’activité',
 }
 
 // Correspondance entre les pages et les types de pièces commerciales
@@ -7202,6 +8311,8 @@ const commercialPages = new Set<PageId>([
   'vat',
   'company',
   'backup',
+  'users',
+  'audit',
 ] as PageId[])
 
 function isProduct(x: unknown): x is Product {
@@ -7287,6 +8398,64 @@ export default function App() {
   const [cash, setCash] = useCashBalance()
   // Bandeau d'alerte de stock masquable jusqu'au prochain chargement
   const [alertBannerHidden, setAlertBannerHidden] = useState(false)
+
+  // ---------- Utilisateurs, session et journal d'activité ----------
+  const [users, setUsers] = useUsers()
+  const [audit, setAudit] = useAudit()
+  const [accessSettings, setAccessSettings] = useAccessSettings()
+  const [sessionId, setSessionId] = useState(readSession)
+  const [locked, setLocked] = useState(false)
+  const currentUser = users.find((u) => u.id === sessionId && u.active) ?? null
+  const needsLogin = users.length > 0 && (!currentUser || locked)
+
+  const log = useCallback(
+    (action: string, detail: string, who?: string) => {
+      const entry: AuditEntry = { id: newId(), at: new Date().toISOString(), user: who ?? currentUser?.name ?? 'Administrateur (installation)', action, detail }
+      // On garde les 5 000 dernières actions
+      setAudit((a) => [...a, entry].slice(-5000))
+    },
+    [currentUser, setAudit],
+  )
+  const access = useMemo(() => accessFor(currentUser, log), [currentUser, log])
+
+  function login(user: User) {
+    const at = new Date().toISOString()
+    setUsers((list) => list.map((u) => (u.id === user.id ? { ...u, lastLogin: at } : u)))
+    writeSession(user.id)
+    setSessionId(user.id)
+    log(locked && user.id === sessionId ? 'Session déverrouillée' : 'Connexion', user.name, user.name)
+    // Changement d'utilisateur : on repart de l'accueil (pas à la création du premier compte)
+    if (sessionId && user.id !== sessionId) {
+      setPage('home')
+      setTabs(['home'])
+    }
+    setLocked(false)
+  }
+
+  function logout() {
+    log('Déconnexion', currentUser?.name ?? '')
+    writeSession(null)
+    setSessionId(null)
+    setLocked(false)
+    setPage('home')
+    setTabs(['home'])
+  }
+
+  // Verrouillage automatique après inactivité
+  useEffect(() => {
+    if (!currentUser || locked || !accessSettings.lockMinutes) return
+    let timer = window.setTimeout(() => setLocked(true), accessSettings.lockMinutes * 60_000)
+    const reset = () => {
+      window.clearTimeout(timer)
+      timer = window.setTimeout(() => setLocked(true), accessSettings.lockMinutes * 60_000)
+    }
+    const events = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart']
+    for (const e of events) window.addEventListener(e, reset, { passive: true })
+    return () => {
+      window.clearTimeout(timer)
+      for (const e of events) window.removeEventListener(e, reset)
+    }
+  }, [currentUser, locked, accessSettings.lockMinutes])
 
   useEffect(() => {
     try {
@@ -7444,10 +8613,35 @@ export default function App() {
     if (badges.depots) list.push({ id: 'dep', severity: 'info', page: 'depots', text: `${badges.depots} implant(s) en dépôt chez les cliniques` })
     if (!lastBackup || daysBetween(lastBackup, today()) > 7)
       list.push({ id: 'bak', severity: 'warning', page: 'backup', text: lastBackup ? 'Dernière sauvegarde il y a plus de 7 jours' : 'Aucune sauvegarde effectuée' })
-    return list
-  }, [badges, stockAlerts, lastBackup])
+    // Chacun ne voit que les alertes des modules qui lui sont ouverts
+    return list.filter((n) => access.level(moduleOf(n.page).id) !== 'none')
+  }, [badges, stockAlerts, lastBackup, access])
 
   const currentModule = moduleOf(page)
+  const pageLevel = access.level(currentModule.id)
+  const pageAllowed = pageLevel !== 'none' && (access.isAdmin || !ADMIN_PAGES.includes(page))
+  // Pages d'origine sans gestion des droits : en lecture seule, on désactive leurs champs
+  const lockFields = ['catalog', 'stock', 'import', 'breakeven'].includes(page)
+
+  // Recherche limitée à ce que l'utilisateur a le droit de voir
+  const searchable = {
+    documents: documents.filter((d) => access.level(d.kind === 'purchase' || d.kind === 'receipt' || d.kind === 'bill' ? 'purchases' : 'sales') !== 'none'),
+    parties: parties.filter((p) => access.level(p.role === 'client' ? 'sales' : 'purchases') !== 'none'),
+    products: access.level('stock') !== 'none' ? products : [],
+    lots: access.level('stock') !== 'none' ? lots : [],
+  }
+
+  if (needsLogin)
+    return (
+      <LoginScreen
+        users={users}
+        companyName={company.name}
+        logo={company.logo}
+        lockedUser={locked && currentUser ? currentUser : undefined}
+        onLogin={login}
+      />
+    )
+
   const moduleBadges: Partial<Record<ModuleId, number>> = {
     sales: badges.invoices,
     purchases: badges.bills,
@@ -7455,6 +8649,7 @@ export default function App() {
   }
 
   return (
+    <AccessContext.Provider value={access}>
     <div className="layout erp">
       <TopBar
         companyName={company.name}
@@ -7462,6 +8657,11 @@ export default function App() {
         onSearch={() => setSearchOpen(true)}
         onNavigate={navigate}
         onCreate={(kind) => openDocument(kind, 'new')}
+        onLock={() => {
+          log('Session verrouillée', currentUser?.name ?? '')
+          setLocked(true)
+        }}
+        onLogout={logout}
       />
       <ModuleBar current={currentModule.id} onOpen={navigate} badges={moduleBadges} />
       <div className="erp-body">
@@ -7494,7 +8694,7 @@ export default function App() {
           {isSampleData ? ' · données de démonstration' : ''}
         </p>
         {page !== 'home' && <h1>{titles[page]}</h1>}
-        {stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && (
+        {stockAlerts.total > 0 && !alertBannerHidden && page !== 'alerts' && page !== 'home' && access.level('stock') !== 'none' && (
           <div className="stock-alert-banner no-print">
             <span>
               <strong>Alerte stock :</strong>{' '}
@@ -7514,6 +8714,9 @@ export default function App() {
             </button>
           </div>
         )}
+        {!pageAllowed && <AccessDenied />}
+        {pageAllowed && (
+        <ReadOnlyArea readOnly={pageLevel === 'read'} lock={lockFields}>
         {!commercialPages.has(page) && (
           <>
             <div className="export-bar" style={{ alignItems: 'center' }}>
@@ -7627,27 +8830,40 @@ export default function App() {
         {page === 'vat' && <VatPage documents={documents} />}
         {page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
         {page === 'backup' && <BackupPage />}
+        {page === 'users' && (
+          <UsersPage
+            users={users}
+            onChange={setUsers}
+            settings={accessSettings}
+            onSettingsChange={setAccessSettings}
+            onFirstAdmin={login}
+          />
+        )}
+        {page === 'audit' && <AuditPage entries={audit} />}
+        </ReadOnlyArea>
+        )}
       </main>
       </div>
       <StatusBar companyName={company.name} documentsCount={documents.length} productsCount={products.length} lastBackup={lastBackup} />
       {searchOpen && (
         <GlobalSearch
-          documents={documents}
-          parties={parties}
-          products={products}
-          lots={lots}
+          documents={searchable.documents}
+          parties={searchable.parties}
+          products={searchable.products}
+          lots={searchable.lots}
           onPick={pickSearch}
           onClose={() => setSearchOpen(false)}
         />
       )}
     </div>
+    </AccessContext.Provider>
   )
 }
 FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
 # Nouvelles pages dans le type PageId
-for id in home stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
+for id in users audit home stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
   grep -q "'$id'" src/types.ts || sed -i.tmp "s/'decision'/'decision' | '$id'/" src/types.ts
 done
 rm -f src/types.ts.tmp

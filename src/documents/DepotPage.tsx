@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import { addDays, daysBetween, emptyLine, frDate, newId, nextNumber, today } from './numbering'
 import { formatMAD, lineHT } from './tva'
 import { emptyIntervention, type CommercialDocument, type DocKind, type DocLine } from './types'
@@ -19,6 +20,8 @@ interface DepotItem {
 /** Implants livrés en dépôt : à facturer après la pose ou à reprendre en stock */
 export default function DepotPage({ documents, onChange, onNavigate, onStockMove }: Props) {
 	const [selected, setSelected] = useState<string[]>([])
+	const access = useAccess()
+	const canWrite = access.level('sales') === 'write'
 	const now = today()
 
 	const groups = useMemo(() => {
@@ -68,6 +71,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 			sourceNumber: [...new Set(items.map((i) => i.bl.number))].join(', '),
 		}
 		onChange([...setDepot(documents, items, 'posed'), created])
+		access.log('Facturation de dépôt', `${created.number} · ${first.party.name} · ${items.length} article(s)`)
 		setSelected([])
 		onNavigate('invoice', id)
 	}
@@ -75,6 +79,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 	function giveBack(item: DepotItem) {
 		if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
 		onChange(setDepot(documents, [item], 'returned'))
+		access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
 		onStockMove([item.line], 1, '', `Retour dépôt ${item.bl.number}`)
 	}
 
@@ -118,6 +123,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 										<tr key={item.line.id}>
 											<td>
 												<input
+													disabled={!canWrite}
 													type="checkbox"
 													checked={selected.includes(item.line.id)}
 													onChange={() => toggle(item.line.id)}
@@ -131,19 +137,23 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 											<td className="num">{daysBetween(item.bl.date, now)} j</td>
 											<td className="num">{formatMAD(lineHT(item.line))}</td>
 											<td className="doc-actions">
-												<button type="button" className="btn-primary" onClick={() => invoice([item])}>
-													Posé → facturer
-												</button>
-												<button type="button" onClick={() => giveBack(item)}>
-													Retour en stock
-												</button>
+												{canWrite && (
+													<>
+														<button type="button" className="btn-primary" onClick={() => invoice([item])}>
+															Posé → facturer
+														</button>
+														<button type="button" onClick={() => giveBack(item)}>
+															Retour en stock
+														</button>
+													</>
+												)}
 											</td>
 										</tr>
 									))}
 								</tbody>
 							</table>
 						</div>
-						{chosen.length > 1 && (
+						{canWrite && chosen.length > 1 && (
 							<div className="doc-toolbar">
 								<button type="button" className="btn-primary" onClick={() => invoice(chosen)}>
 									Facturer les {chosen.length} articles sélectionnés

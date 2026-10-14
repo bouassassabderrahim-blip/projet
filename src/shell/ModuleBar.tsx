@@ -1,6 +1,7 @@
 import Icon from './icons'
 import { MODULES, type ModuleId } from './navigation'
 import type { PageId } from '../types'
+import { useAccess } from '../access/context'
 
 interface Props {
 	current: ModuleId
@@ -11,9 +12,10 @@ interface Props {
 
 /** Ruban des modules : Accueil, Ventes, Achats, Stocks, Finance, Pilotage, Paramètres */
 export default function ModuleBar({ current, onOpen, badges }: Props) {
+	const access = useAccess()
 	return (
 		<nav className="erp-modules no-print" aria-label="Modules">
-			{MODULES.map((m, i) => (
+			{MODULES.map((m, i) => access.level(m.id) === 'none' ? null : (
 				<button
 					key={m.id}
 					type="button"

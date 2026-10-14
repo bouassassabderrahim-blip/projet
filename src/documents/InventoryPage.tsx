@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import type { Product } from '../types'
 import { downloadCsv } from './csv'
 import { frDate, newId, today } from './numbering'
@@ -18,6 +19,9 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
 	const [query, setQuery] = useState('')
 	const [onlyGaps, setOnlyGaps] = useState(false)
 	const [message, setMessage] = useState('')
+	const access = useAccess()
+	const canWrite = access.level('stock') === 'write'
+	const showCosts = access.can('costs')
 
 	const rows = useMemo(() => {
 		const q = query.trim().toLowerCase()
@@ -62,6 +66,7 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
 				})),
 		)
 		setCounts({})
+		access.log('Inventaire validé', `${entered.length} article(s), écart ${formatMAD(gapValue)}`)
 		setMessage(`${reference} validé : ${entered.length} article(s) mis à jour, écart ${formatMAD(gapValue)}.`)
 	}
 
@@ -75,18 +80,22 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
 	return (
 		<div>
 			<div className="doc-stats">
-				<div>
-					<span>Valeur du stock (coût d'achat)</span>
-					<strong>{formatMAD(stockValue)}</strong>
-				</div>
+				{showCosts && (
+					<div>
+						<span>Valeur du stock (coût d'achat)</span>
+						<strong>{formatMAD(stockValue)}</strong>
+					</div>
+				)}
 				<div>
 					<span>Articles avec écart</span>
 					<strong>{changed.length}</strong>
 				</div>
-				<div className={gapValue < 0 ? 'doc-stat-danger' : undefined}>
-					<span>Valeur des écarts</span>
-					<strong>{formatMAD(gapValue)}</strong>
-				</div>
+				{showCosts && (
+					<div className={gapValue < 0 ? 'doc-stat-danger' : undefined}>
+						<span>Valeur des écarts</span>
+						<strong>{formatMAD(gapValue)}</strong>
+					</div>
+				)}
 			</div>
 
 			<div className="doc-toolbar">
@@ -97,9 +106,11 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
 				<button type="button" onClick={exportSheet}>
 					Feuille de comptage (CSV)
 				</button>
-				<button type="button" className="btn-primary" onClick={validate}>
-					Valider l'inventaire
-				</button>
+				{canWrite && (
+					<button type="button" className="btn-primary" onClick={validate}>
+						Valider l'inventaire
+					</button>
+				)}
 			</div>
 			{message && <p className="doc-info">{message}</p>}
 
@@ -113,7 +124,7 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
 							<th className="num">Stock théorique</th>
 							<th className="num">Quantité comptée</th>
 							<th className="num">Écart</th>
-							<th className="num">Valeur de l'écart</th>
+							{showCosts && <th className="num">Valeur de l'écart</th>}
 						</tr>
 					</thead>
 					<tbody>
@@ -129,11 +140,12 @@ export default function InventoryPage({ products, onProductsChange, onMovements 
 										type="number"
 										min={0}
 										value={counts[r.product.id] ?? ''}
+										readOnly={!canWrite}
 										onChange={(e) => setCounts({ ...counts, [r.product.id]: e.target.value })}
 									/>
 								</td>
 								<td className="num">{r.gap === undefined ? '' : r.gap > 0 ? `+${r.gap}` : r.gap}</td>
-								<td className="num">{r.gap ? formatMAD(round2(r.gap * r.product.unitCost)) : ''}</td>
+								{showCosts && <td className="num">{r.gap ? formatMAD(round2(r.gap * r.product.unitCost)) : ''}</td>}
 							</tr>
 						))}
 					</tbody>

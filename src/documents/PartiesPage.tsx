@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { useAccess } from '../access/context'
 import ReminderPrint from './ReminderPrint'
 import { balanceOf, isActive, isOverdue, sign } from './ledger'
 import { frDate, newId, today } from './numbering'
@@ -45,6 +46,8 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
 	const [error, setError] = useState('')
 	const now = today()
 	const isClient = role === 'client'
+	const access = useAccess()
+	const canWrite = access.level(isClient ? 'sales' : 'purchases') === 'write'
 	const side = isClient ? 'sale' : 'purchase'
 
 	const rows = useMemo(() => {
@@ -77,6 +80,7 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
 		if (duplicate) return setError('Un tiers porte déjà ce nom.')
 		const rec = { ...editing, name: editing.name.trim() }
 		onChange(parties.some((p) => p.id === rec.id) ? parties.map((p) => (p.id === rec.id ? rec : p)) : [...parties, rec])
+		access.log(isClient ? 'Fiche client enregistrée' : 'Fiche fournisseur enregistrée', rec.name)
 		setEditing(null)
 		setError('')
 	}
@@ -96,9 +100,11 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
 				<div className="doc-editor-head">
 					<h2>{editing.name || (isClient ? 'Nouveau client' : 'Nouveau fournisseur')}</h2>
 					<div className="doc-editor-actions">
-						<button type="button" className="btn-primary" onClick={save}>
-							Enregistrer
-						</button>
+						{canWrite && (
+							<button type="button" className="btn-primary" onClick={save}>
+								Enregistrer
+							</button>
+						)}
 						<button type="button" onClick={() => setEditing(null)}>
 							Fermer
 						</button>
@@ -183,13 +189,15 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
 	return (
 		<div>
 			<div className="doc-toolbar">
-				<button
-					type="button"
-					className="btn-primary"
-					onClick={() => setEditing({ ...emptyParty(), id: newId(), role, notes: '' })}
-				>
-					+ {isClient ? 'Nouveau client' : 'Nouveau fournisseur'}
-				</button>
+				{canWrite && (
+					<button
+						type="button"
+						className="btn-primary"
+						onClick={() => setEditing({ ...emptyParty(), id: newId(), role, notes: '' })}
+					>
+						+ {isClient ? 'Nouveau client' : 'Nouveau fournisseur'}
+					</button>
+				)}
 				<input
 					className="doc-search"
 					placeholder="Rechercher : nom, ville, ICE, téléphone…"
@@ -243,7 +251,7 @@ export default function PartiesPage({ role, parties, onChange, documents, compan
 												Lettre de relance
 											</button>
 										)}
-										{r.docs.length === 0 && (
+										{canWrite && r.docs.length === 0 && (
 											<button
 												type="button"
 												onClick={() =>
