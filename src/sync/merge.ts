@@ -44,7 +44,10 @@ export function mergeDocument(local: unknown, remote: unknown, base: unknown | u
 	return { result: { ...winner, payments: all, ...(settled ? { status: 'paid' as const } : {}) }, conflict }
 }
 
-/** Une pièce validée ne peut pas être supprimée (seuls les brouillons le peuvent) */
+/**
+ * Une pièce validée ne peut pas être supprimée (seuls les brouillons le peuvent),
+ * sauf une facture reprise de l'ancien logiciel retirée par « Annuler cet import »
+ */
 export function protectDocument(record: unknown): boolean {
-	return isDoc(record) && record.status !== 'draft'
+	return isDoc(record) && record.status !== 'draft' && !record.legacy
 }

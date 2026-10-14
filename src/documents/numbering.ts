@@ -1,10 +1,33 @@
 import { DOC_LABELS, type CommercialDocument, type DocKind, type DocLine } from './types'
 
-/** Numérotation chronologique et continue par type et par année : FA-2026-0001, BL-2026-0001… */
+/** Derniers numéros utilisés dans l'ancien logiciel, par type et année (« invoice:2026 » → 457) */
+export const NUMBERING_KEY = 'profitpilot:numbering:v1'
+
+export type NumberingStarts = Record<string, number>
+
+export function numberingStarts(): NumberingStarts {
+	try {
+		const data: unknown = JSON.parse(localStorage.getItem(NUMBERING_KEY) ?? '{}')
+		if (typeof data !== 'object' || data === null) return {}
+		return Object.fromEntries(Object.entries(data).filter((e): e is [string, number] => Number.isInteger(e[1]) && e[1] > 0))
+	} catch {
+		return {}
+	}
+}
+
+/**
+ * Numérotation chronologique et continue par type et par année : FA-2026-0001, BL-2026-0001…
+ * Après une reprise en cours d'année, elle poursuit celle de l'ancien logiciel (dernier numéro indiqué).
+ */
 export function nextNumber(kind: DocKind, docs: CommercialDocument[], date: string): string {
+	return nextNumberWith(kind, docs, date, numberingStarts())
+}
+
+/** Même calcul avec des numéros de départ donnés (aperçu pendant la saisie) */
+export function nextNumberWith(kind: DocKind, docs: CommercialDocument[], date: string, starts: NumberingStarts): string {
 	const year = date.slice(0, 4)
 	const prefix = `${DOC_LABELS[kind].prefix}-${year}-`
-	let max = 0
+	let max = starts[`${kind}:${year}`] ?? 0
 	for (const d of docs) {
 		if (d.kind !== kind || !d.number.startsWith(prefix)) continue
 		const seq = Number(d.number.slice(prefix.length))

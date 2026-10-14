@@ -32,10 +32,12 @@ interface PeriodRow {
 function* imputations(d: CommercialDocument, useDocDate: boolean) {
 	const t = computeTotals(d)
 	if (useDocDate) {
-		yield { date: d.date, ratio: 1, t }
+		// Facture reprise : déjà déclarée à sa date dans l'ancien logiciel
+		if (!d.legacy) yield { date: d.date, ratio: 1, t }
 		return
 	}
-	for (const p of paymentsOf(d)) yield { date: p.date, ratio: t.netToPay ? p.amount / t.netToPay : 0, t }
+	// Règlements faits dans l'ancien logiciel avant la reprise : TVA déjà déclarée là-bas
+	for (const p of paymentsOf(d)) if (!p.legacy) yield { date: p.date, ratio: t.netToPay ? p.amount / t.netToPay : 0, t }
 }
 
 /** Tableau de préparation de la déclaration de TVA : collectée − déductible = TVA due */

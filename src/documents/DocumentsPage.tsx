@@ -362,7 +362,8 @@ export default function DocumentsPage({
 
 	function exportJournal() {
 		const kinds: DocKind[] = isPurchase ? ['bill'] : ['invoice', 'credit']
-		const docs = documents.filter((d) => kinds.includes(d.kind) && d.status !== 'draft').sort((a, b) => a.date.localeCompare(b.date) || a.number.localeCompare(b.number))
+		// Factures reprises de l'ancien logiciel : déjà dans le journal de l'ancien logiciel
+		const docs = documents.filter((d) => kinds.includes(d.kind) && d.status !== 'draft' && !d.legacy).sort((a, b) => a.date.localeCompare(b.date) || a.number.localeCompare(b.number))
 		downloadCsv(`journal-${isPurchase ? 'achats' : 'ventes'}-${now}.csv`, journal(docs, documents))
 	}
 
@@ -508,6 +509,11 @@ export default function DocumentsPage({
 											<button type="button" className="doc-link" onClick={() => setView(d.status === 'draft' && canWrite ? { mode: 'edit', doc: d } : { mode: 'print', id: d.id })}>
 												{d.number}
 											</button>
+											{d.legacy && (
+												<span className="doc-badge doc-badge-legacy" title="Solde repris de l’ancien logiciel">
+													Reprise
+												</span>
+											)}
 										</td>
 										<td>{frDate(d.date)}</td>
 										<td>{d.party.name}</td>

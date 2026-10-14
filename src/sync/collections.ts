@@ -42,6 +42,7 @@ export const COLLECTIONS: CollectionSpec[] = [
 	{ name: 'cash', key: 'profitpilot:cash:v1', kind: 'value' },
 	{ name: 'currency', key: 'profitpilot:currency:v1', kind: 'value' },
 	{ name: 'stock-period', key: 'profitpilot:stock-period:v1', kind: 'value' },
+	{ name: 'numbering', key: 'profitpilot:numbering:v1', kind: 'value' },
 ]
 
 export const VALUE_ID = '_'

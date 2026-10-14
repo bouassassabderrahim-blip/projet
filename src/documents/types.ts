@@ -39,6 +39,8 @@ export interface PartyRecord extends Party {
 	notes: string
 	/** Délai de paiement accordé, en jours */
 	paymentTerms?: number
+	/** Code du tiers dans l'ancien logiciel (reprise des données) */
+	code?: string
 }
 
 /**
@@ -120,6 +122,8 @@ export interface Payment {
 	amount: number
 	method: PaymentMethod
 	reference: string
+	/** Réglé dans l'ancien logiciel avant la reprise : TVA déjà déclarée là-bas */
+	legacy?: boolean
 }
 
 /** Intervention chirurgicale liée à une facture ou un BL */
@@ -152,6 +156,11 @@ export interface CommercialDocument {
 	intervention?: Intervention
 	/** Numéro de la facture chez le fournisseur */
 	supplierRef?: string
+	/**
+	 * Facture reprise d'un ancien logiciel (solde d'ouverture) : suivie pour l'encaissement, mais exclue
+	 * du chiffre d'affaires, du journal comptable et de la TVA déjà déclarée dans l'ancien logiciel
+	 */
+	legacy?: boolean
 	/** Traçabilité : utilisateur qui a créé et validé la pièce */
 	createdBy?: string
 	validatedBy?: string

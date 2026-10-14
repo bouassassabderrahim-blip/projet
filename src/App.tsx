@@ -21,6 +21,7 @@ import LotsPage from './documents/LotsPage'
 import KitsPage from './documents/KitsPage'
 import PartiesPage from './documents/PartiesPage'
 import BackupPage from './documents/BackupPage'
+import MigrationPage from './documents/MigrationPage'
 import StockAlertsPage from './documents/StockAlertsPage'
 import StockMovesPage from './documents/StockMovesPage'
 import InventoryPage from './documents/InventoryPage'
@@ -92,6 +93,7 @@ const titles: Record<PageId, string> = {
 	vat: 'Déclaration de TVA',
 	company: 'Société et mise en page des documents',
 	backup: 'Sauvegarde des données',
+	migration: 'Reprise des données d’un ancien logiciel',
 	users: 'Utilisateurs et droits d’accès',
 	sync: 'Multi-postes : utiliser l’ERP sur plusieurs ordinateurs',
 	audit: 'Journal d’activité',
@@ -722,6 +724,26 @@ export default function App() {
 				{page === 'vat' && <VatPage documents={documents} />}
 				{page === 'company' && <CompanySettings company={company} onChange={setCompany} />}
 				{page === 'backup' && <BackupPage />}
+				{page === 'migration' && (
+					<MigrationPage
+						parties={parties}
+						onParties={setParties}
+						products={products}
+						isSampleData={isSampleData}
+						onProducts={(update) => {
+							setProducts(update)
+							setIsSampleData(false)
+						}}
+						onRestoreSample={() => {
+							setProducts(sampleProducts)
+							setIsSampleData(true)
+						}}
+						lots={lots}
+						onLots={setLots}
+						documents={documents}
+						onDocuments={setDocuments}
+					/>
+				)}
 				{page === 'users' && (
 					<UsersPage
 						users={users}

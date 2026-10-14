@@ -209,6 +209,23 @@
 .doc-badge-paid { background: #dcfce7; color: var(--pp-ok); border-color: #a7e3bd; }
 .doc-badge-cancelled { background: #fee2e2; color: #991b1b; border-color: #f5b5b5; text-decoration: line-through; }
 .doc-badge-late { background: #fef3c7; color: #92400e; border-color: #f2cf7a; }
+.doc-badge-legacy { margin-left: 6px; background: #f1f5f9; color: #475569; border-color: #cbd5e1; }
+.doc-badge-error { background: #fee2e2; color: #991b1b; border-color: #f5b5b5; }
+
+/* Reprise des données */
+.mig-targets { grid-template-columns: repeat(3, 1fr); }
+.mig-targets .doc-mode { cursor: pointer; text-align: left; font: inherit; }
+.mig-targets strong { display: flex; align-items: center; }
+.mig-targets .mig-step { display: inline-grid; flex: none; place-items: center; width: 20px; height: 20px; margin-right: 6px; border-radius: 50%; background: var(--pp-blue-2); color: #fff; font-size: 11px; font-weight: 700; }
+.mig-source { display: grid; grid-template-columns: 1fr 2fr; gap: 12px; align-items: start; }
+.mig-source small { display: block; margin-top: 4px; }
+.mig-source textarea { width: 100%; min-height: 110px; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.mig-map select { width: 100%; }
+.mig-map td:first-child { white-space: nowrap; }
+.mig-example { color: var(--pp-muted); font-size: 12px; max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mig-rate select { width: auto; margin-left: 6px; }
+.mig-numbering { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px 16px; }
+.mig-numbering input { width: 90px; }
 .doc-badge-depot { background: #ede9fe; color: #5b21b6; border-color: #cdbff7; }
 .doc-exp-expired { background: #fee2e2; color: #991b1b; border-color: #f5b5b5; }
 .doc-exp-soon { background: #fef3c7; color: #92400e; border-color: #f2cf7a; }

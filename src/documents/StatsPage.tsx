@@ -140,7 +140,8 @@ export default function StatsPage({ documents, products }: Props) {
 		const sameDay = today().slice(4)
 
 		for (const d of documents) {
-			if ((d.kind !== 'invoice' && d.kind !== 'credit') || !isActive(d)) continue
+			// Factures reprises de l'ancien logiciel : leur chiffre d'affaires y est déjà compté
+			if ((d.kind !== 'invoice' && d.kind !== 'credit') || !isActive(d) || d.legacy) continue
 			const k = sign(d)
 			const t = computeTotals(d)
 			// Même période de l'année précédente, pour la comparaison

@@ -47,7 +47,7 @@ function salesSummary(documents: CommercialDocument[]) {
 		if (!isActive(d)) continue
 		if (d.kind === 'invoice' || d.kind === 'credit') {
 			if (d.kind === 'invoice') invoiceCount++
-			if (d.date.startsWith(month)) monthHT += sign(d) * computeDocTotals(d).totalHT
+			if (d.date.startsWith(month) && !d.legacy) monthHT += sign(d) * computeDocTotals(d).totalHT
 		}
 		if (d.kind === 'invoice') unpaid += balanceOf(d, documents)
 		if (d.kind === 'bill') toPay += balanceOf(d, documents)
