@@ -119,6 +119,16 @@ const isPartyList = listOf<PartyRecord>(
 	(x) => isObj(x) && typeof x.id === 'string' && typeof x.name === 'string' && (x.role === 'client' || x.role === 'supplier'),
 )
 
+/** Pièces telles qu'enregistrées (lecture directe, hors React : après une attente réseau) */
+export function readDocuments(): CommercialDocument[] | null {
+	try {
+		const data: unknown = JSON.parse(localStorage.getItem(DOCS_KEY) ?? 'null')
+		return isDocumentList(data) ? data : null
+	} catch {
+		return null
+	}
+}
+
 export const useDocuments = () => usePersistentState<CommercialDocument[]>(DOCS_KEY, () => [], isDocumentList)
 export const useCompany = () => usePersistentState<CompanyInfo>(COMPANY_KEY, emptyCompany, isCompany)
 export const useLots = () => usePersistentState<StockLot[]>(LOTS_KEY, () => [], isLotList)

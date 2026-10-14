@@ -15,8 +15,11 @@ export interface CollectionSpec {
 	/** Nombre maximum d'éléments gardés sur ce poste (les plus récents selon sortKey) */
 	maxLocal?: number
 	sortKey?: string
-	/** Fusion de deux versions modifiées en parallèle (préférée, autre) */
-	merge?: (preferred: unknown, other: unknown) => unknown
+	/**
+	 * Règles métier de fusion : local = version de ce poste, remote = version serveur,
+	 * base = dernière version commune (absente si ce poste n'a rien modifié : la version serveur est alors préférée)
+	 */
+	merge?: (local: unknown, remote: unknown, base: unknown | undefined) => { result: unknown; conflict: boolean }
 	/** Enregistrement qu'une suppression venue d'ailleurs ne doit pas effacer */
 	protect?: (record: unknown) => boolean
 	/** Compteurs : en cas de modification sur deux postes, les variations s'additionnent (stock, quantité) */
@@ -42,6 +45,9 @@ export const COLLECTIONS: CollectionSpec[] = [
 ]
 
 export const VALUE_ID = '_'
+
+/** Le navigateur refuse d'enregistrer : rien n'est marqué comme reçu, tout sera réappliqué plus tard */
+export class StorageFullError extends Error {}
 
 type Rec = Record<string, unknown> & { id: string }
 
@@ -112,8 +118,14 @@ export function writeLocal(spec: CollectionSpec, records: Map<string, unknown>, 
 		} else next = JSON.stringify(list)
 	}
 	if (next === oldValue) return
-	if (next === null) localStorage.removeItem(spec.key)
-	else localStorage.setItem(spec.key, next)
+	try {
+		if (next === null) localStorage.removeItem(spec.key)
+		else localStorage.setItem(spec.key, next)
+	} catch {
+		throw new StorageFullError(
+			'Stockage du navigateur plein : les modifications des autres postes ne peuvent plus être enregistrées ici. Libérez de la place (Paramètres › Sauvegarde) puis rechargez la page.',
+		)
+	}
 	window.dispatchEvent(new StorageEvent('storage', { key: spec.key, oldValue, newValue: next, storageArea: localStorage }))
 }
 
@@ -122,57 +134,4 @@ export function localOrder(spec: CollectionSpec): string[] {
 	return [...readLocal(spec).keys()]
 }
 
-/** JSON à clés triées : deux objets égaux donnent toujours le même texte (le serveur réordonne les clés) */
-export function stableStringify(value: unknown): string {
-	if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
-	if (Array.isArray(value)) return '[' + value.map((v) => (v === undefined ? 'null' : stableStringify(v))).join(',') + ']'
-	const obj = value as Record<string, unknown>
-	const keys = Object.keys(obj)
-		.filter((k) => obj[k] !== undefined)
-		.sort()
-	return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
-}
-
-/** Empreinte courte d'un enregistrement (FNV-1a 32 bits + longueur) */
-export function fingerprint(value: unknown): string {
-	const s = stableStringify(value)
-	let h = 0x811c9dc5
-	for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
-	return h.toString(36) + '.' + s.length.toString(36)
-}
-
-const same = (a: unknown, b: unknown) => stableStringify(a) === stableStringify(b)
-
-/**
- * Fusion à trois versions, champ par champ : base = dernière version serveur connue,
- * local = version de ce poste, remote = nouvelle version serveur.
- * - champ changé d'un seul côté : ce changement est gardé ;
- * - compteur changé des deux côtés : les deux variations s'additionnent (10 → 8 ici, 10 → 7 ailleurs : 5) ;
- * - autre champ changé des deux côtés : la version de ce poste l'emporte (conflit compté).
- */
-export function threeWayMerge(
-	base: unknown,
-	local: unknown,
-	remote: unknown,
-	deltaFields: string[] = [],
-): { result: unknown; conflict: boolean } {
-	const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
-	if (!isObj(base) || !isObj(local) || !isObj(remote)) return { result: local, conflict: true }
-	const out: Record<string, unknown> = {}
-	let conflict = false
-	for (const key of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
-		const b = base[key]
-		const l = local[key]
-		const r = remote[key]
-		let v: unknown
-		if (same(l, b)) v = r
-		else if (same(r, b) || same(l, r)) v = l
-		else if (deltaFields.includes(key) && typeof b === 'number' && typeof l === 'number' && typeof r === 'number') v = r + (l - b)
-		else {
-			v = l
-			conflict = true
-		}
-		if (v !== undefined) out[key] = v
-	}
-	return { result: out, conflict }
-}
+export { fingerprint, stableStringify, threeWayMerge } from './json'

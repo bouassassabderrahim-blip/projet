@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useAccess } from '../access/context'
+import { loadConfig } from '../sync/config'
 import { downloadFile } from './csv'
 import { LAST_BACKUP_KEY, STORAGE_LIMIT, createBackup, isBackupFile, restoreBackup, storageUsage } from './storage'
 import { daysBetween, frDate, today } from './numbering'
@@ -22,6 +23,7 @@ export default function BackupPage() {
 	const age = last ? daysBetween(last, today()) : null
 	const used = storageUsage()
 	const usedPct = Math.min(100, Math.round((used / STORAGE_LIMIT) * 100))
+	const multi = loadConfig()?.joined === true
 
 	function exportAll() {
 		const backup = createBackup()
@@ -43,6 +45,7 @@ export default function BackupPage() {
 			try {
 				const data: unknown = JSON.parse(String(reader.result))
 				if (!isBackupFile(data)) return setError("Ce fichier n'est pas une sauvegarde ProfitPilot.")
+				if (loadConfig()?.joined) return setError('Restauration impossible en mode multi-postes : déconnectez d’abord ce poste.')
 				const date = frDate(data.createdAt.slice(0, 10))
 				if (!confirm(`Remplacer TOUTES les données actuelles par la sauvegarde du ${date} ?`)) return
 				restoreBackup(data)
@@ -86,10 +89,17 @@ export default function BackupPage() {
 			<fieldset className="doc-panel">
 				<legend>Restaurer</legend>
 				<p>Remplace toutes les données de ce navigateur par celles d'un fichier de sauvegarde.</p>
-				{access.isAdmin ? (
-					<input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
-				) : (
+				{!access.isAdmin ? (
 					<p className="doc-warning">Seul un administrateur peut restaurer une sauvegarde.</p>
+				) : multi ? (
+					// Restaurer ici renverrait d'anciennes versions mêlées aux nouvelles vers tous les postes
+					<p className="doc-warning">
+						Ce poste partage ses données avec d'autres ordinateurs (multi-postes) : la restauration est désactivée pour ne pas
+						mélanger d'anciennes données avec celles des autres postes. Pour revenir à une sauvegarde, déconnectez d'abord
+						ce poste (Paramètres › Administration › Multi-postes), restaurez, puis créez un nouveau dossier en ligne.
+					</p>
+				) : (
+					<input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
 				)}
 			</fieldset>
 

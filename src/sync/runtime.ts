@@ -56,13 +56,58 @@ export function isSyncActive(): boolean {
 	return engine !== null && loadConfig()?.joined === true
 }
 
+/** Relance une synchronisation dès que possible (sans effet si un autre onglet de ce poste synchronise) */
+export function syncSoon() {
+	void engine?.syncNow()
+}
+
+const DONE_KEY = 'profitpilot-sync:done-actions'
+
+function doneActions(): string[] {
+	try {
+		const list: unknown = JSON.parse(localStorage.getItem(DONE_KEY) ?? '[]')
+		return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : []
+	} catch {
+		return []
+	}
+}
+
 /**
- * Numéro définitif attribué par le serveur (null en mode un seul poste).
- * Lève une erreur hors ligne : on ne valide pas de pièce sans numéro partagé, pour éviter tout doublon.
+ * Action unique sur une pièce (validation, annulation, retour de dépôt) en mode multi-postes :
+ * le serveur ne l'accorde qu'à un seul poste (et attribue le numéro définitif d'une validation) ;
+ * entre deux onglets du même poste, un verrou du navigateur et une marque locale évitent le doublon.
+ * En mode un seul poste, l'action est appliquée directement (numéro null).
+ * Renvoie 'already' si un autre poste ou onglet l'a déjà faite : rien n'est appliqué ici.
+ * Lève une erreur hors ligne : on n'agit pas sans l'accord du serveur.
  */
-export async function allocateNumber(kind: string, year: number, min: number): Promise<number | null> {
-	if (!isSyncActive() || !engine) return null
-	return engine.remote.nextNumber(kind, year, min)
+export async function runDocAction(
+	request: { docId: string; action: string; kind: string; year: number; min: number },
+	apply: (number: number | null) => void,
+): Promise<'applied' | 'already'> {
+	const config = loadConfig()
+	const current = engine
+	if (!current || !config?.joined) {
+		apply(null)
+		return 'applied'
+	}
+	const mark = `${config.dossier}:${request.docId}:${request.action}`
+	const run = async (): Promise<'applied' | 'already'> => {
+		if (doneActions().includes(mark)) return 'already'
+		const claim = await current.claim(request.docId, request.action, request.kind, request.year, request.min)
+		if (claim.already) {
+			syncSoon()
+			return 'already'
+		}
+		apply(claim.number)
+		try {
+			localStorage.setItem(DONE_KEY, JSON.stringify([...doneActions(), mark].slice(-300)))
+		} catch {
+			// stockage plein : seul le verrou protège encore les autres onglets
+		}
+		return 'applied'
+	}
+	const locks = (navigator as Navigator & { locks?: LockManager }).locks
+	return locks ? locks.request(`profitpilot-doc:${mark}`, run) : run()
 }
 
 export function useSyncStatus(): SyncStatus | null {

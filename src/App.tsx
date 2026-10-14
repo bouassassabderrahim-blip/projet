@@ -206,6 +206,8 @@ export default function App() {
 	const [partyId, setPartyId] = useState<string | undefined>()
 	// Pièce à ouvrir directement en arrivant sur une page (après une conversion ou une facturation de dépôt)
 	const [openId, setOpenId] = useState<string | undefined>()
+	// Chaque ouverture demandée (Créer, recherche, lien) repart d'une vue neuve, même sur la page déjà affichée
+	const [openSeq, setOpenSeq] = useState(0)
 	const [products, setProducts] = useState<Product[]>(initial?.products ?? sampleProducts)
 	const [isSampleData, setIsSampleData] = useState(initial?.isSampleData ?? true)
 	const [fixedCosts, setFixedCosts] = useState<FixedCost[]>(loadFixedCosts)
@@ -366,6 +368,7 @@ export default function App() {
 
 	function openDocument(kind: DocKind, id?: string) {
 		setOpenId(id)
+		setOpenSeq((n) => n + 1)
 		show(pageOfKind[kind])
 	}
 
@@ -665,7 +668,7 @@ export default function App() {
 				{page === 'decision' && <Decision products={products} />}
 				{docKind && (
 					<DocumentsPage
-						key={docKind + (openId ?? '')} // réinitialise la vue en changeant de page
+						key={`${docKind}:${openId ?? ''}:${openSeq}`} // réinitialise la vue en changeant de page ou à chaque ouverture
 						kind={docKind}
 						documents={documents}
 						onChange={setDocuments}

@@ -1,20 +1,29 @@
 // État de synchronisation de ce poste, rangé dans IndexedDB (pas dans le localStorage limité à 5 Mo)
 
+/** Envoi parti sans réponse sûre (coupure) : gardé pour reconnaître notre propre écriture à la relecture */
+export interface PendingPush {
+	rev: string
+	data: unknown
+	deleted: boolean
+}
+
 export interface SyncState {
 	/** Empreinte de chaque enregistrement tel que synchronisé : « collection␟id » → empreinte */
 	base: Record<string, string>
-	/** Date serveur de la dernière version vue : « collection␟id » → updated_at */
+	/** Date serveur de la version de référence (base) : « collection␟id » → updated_at, renvoyée à l'envoi */
 	seen: Record<string, string>
 	/** Date serveur la plus récente reçue */
 	lastPull: string | null
 	/** Dernière version serveur connue de chaque enregistrement (fusion à trois versions) */
 	snapshot: Record<string, unknown>
+	/** Envois en attente de confirmation, par enregistrement (du plus ancien au plus récent) */
+	pending: Record<string, PendingPush[]>
 }
 
 const DB = 'profitpilot-sync'
 const STORE = 'kv'
 
-export const emptyState = (): SyncState => ({ base: {}, seen: {}, lastPull: null, snapshot: {} })
+export const emptyState = (): SyncState => ({ base: {}, seen: {}, lastPull: null, snapshot: {}, pending: {} })
 
 function open(): Promise<IDBDatabase> {
 	return new Promise((resolve, reject) => {
@@ -41,7 +50,8 @@ export async function loadState(dossier: string): Promise<SyncState> {
 
 /**
  * Enregistre l'état. Si IndexedDB est indisponible (navigation privée…), l'état reste en mémoire :
- * la synchronisation continue, seul un rechargement de la page la fera repartir de zéro.
+ * la synchronisation continue ; après un rechargement, ce poste repart de la version en ligne
+ * (règle « jamais vu sur ce poste : la version en ligne fait foi »), sans rien écraser chez les autres.
  */
 export async function saveState(dossier: string, state: SyncState): Promise<void> {
 	try {

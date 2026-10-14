@@ -14,9 +14,14 @@ for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src
 
 
 
+
+
+
+
 cat > src/documents/BackupPage.tsx <<'FIN_DU_FICHIER'
 import { useState } from 'react'
 import { useAccess } from '../access/context'
+import { loadConfig } from '../sync/config'
 import { downloadFile } from './csv'
 import { LAST_BACKUP_KEY, STORAGE_LIMIT, createBackup, isBackupFile, restoreBackup, storageUsage } from './storage'
 import { daysBetween, frDate, today } from './numbering'
@@ -39,6 +44,7 @@ export default function BackupPage() {
   const age = last ? daysBetween(last, today()) : null
   const used = storageUsage()
   const usedPct = Math.min(100, Math.round((used / STORAGE_LIMIT) * 100))
+  const multi = loadConfig()?.joined === true
 
   function exportAll() {
     const backup = createBackup()
@@ -60,6 +66,7 @@ export default function BackupPage() {
       try {
         const data: unknown = JSON.parse(String(reader.result))
         if (!isBackupFile(data)) return setError("Ce fichier n'est pas une sauvegarde ProfitPilot.")
+        if (loadConfig()?.joined) return setError('Restauration impossible en mode multi-postes : déconnectez d’abord ce poste.')
         const date = frDate(data.createdAt.slice(0, 10))
         if (!confirm(`Remplacer TOUTES les données actuelles par la sauvegarde du ${date} ?`)) return
         restoreBackup(data)
@@ -103,10 +110,17 @@ export default function BackupPage() {
       <fieldset className="doc-panel">
         <legend>Restaurer</legend>
         <p>Remplace toutes les données de ce navigateur par celles d'un fichier de sauvegarde.</p>
-        {access.isAdmin ? (
-          <input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
-        ) : (
+        {!access.isAdmin ? (
           <p className="doc-warning">Seul un administrateur peut restaurer une sauvegarde.</p>
+        ) : multi ? (
+          // Restaurer ici renverrait d'anciennes versions mêlées aux nouvelles vers tous les postes
+          <p className="doc-warning">
+            Ce poste partage ses données avec d'autres ordinateurs (multi-postes) : la restauration est désactivée pour ne pas
+            mélanger d'anciennes données avec celles des autres postes. Pour revenir à une sauvegarde, déconnectez d'abord
+            ce poste (Paramètres › Administration › Multi-postes), restaurez, puis créez un nouveau dossier en ligne.
+          </p>
+        ) : (
+          <input type="file" accept="application/json,.json" onChange={(e) => importAll(e.target.files?.[0])} />
         )}
       </fieldset>
 
@@ -384,7 +398,8 @@ FIN_DU_FICHIER
 echo "OK src/documents/CompanySettings.tsx"
 
 cat > src/documents/DepotPage.tsx <<'FIN_DU_FICHIER'
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { runDocAction } from '../sync/runtime'
 import { useAccess } from '../access/context'
 import { addDays, daysBetween, emptyLine, frDate, newId, nextNumber, today } from './numbering'
 import { formatMAD, lineHT } from './tva'
@@ -393,7 +408,7 @@ import './documents.css'
 
 interface Props {
   documents: CommercialDocument[]
-  onChange: (docs: CommercialDocument[]) => void
+  onChange: Dispatch<SetStateAction<CommercialDocument[]>>
   onNavigate: (kind: DocKind, openId?: string) => void
   onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => Record<string, number> | void
 }
@@ -462,11 +477,19 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
     onNavigate('invoice', id)
   }
 
-  function giveBack(item: DepotItem) {
+  async function giveBack(item: DepotItem) {
     if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
-    onChange(setDepot(documents, [item], 'returned'))
-    access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
-    onStockMove([{ ...item.line, quantity: item.line.movedQty ?? item.line.quantity }], 1, '', `Retour dépôt ${item.bl.number}`)
+    try {
+      // Multi-postes : un seul poste peut reprendre cet article (pas de double entrée en stock)
+      const outcome = await runDocAction({ docId: item.bl.id, action: `return:${item.line.id}`, kind: 'delivery', year: 0, min: 0 }, () => {
+        onChange((prev) => setDepot(prev, [item], 'returned'))
+        access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
+        onStockMove([{ ...item.line, quantity: item.line.movedQty ?? item.line.quantity }], 1, '', `Retour dépôt ${item.bl.number}`)
+      })
+      if (outcome === 'already') alert('Cet article vient d’être repris en stock sur un autre poste.')
+    } catch {
+      alert('Reprise impossible pour le moment : en mode multi-postes, le serveur doit la confirmer. Vérifiez la connexion Internet puis réessayez.')
+    }
   }
 
   const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
@@ -528,7 +551,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
                             <button type="button" className="btn-primary" onClick={() => invoice([item])}>
                               Posé → facturer
                             </button>
-                            <button type="button" onClick={() => giveBack(item)}>
+                            <button type="button" onClick={() => void giveBack(item)}>
                               Retour en stock
                             </button>
                           </>
@@ -1314,8 +1337,8 @@ FIN_DU_FICHIER
 echo "OK src/documents/DocumentPrint.tsx"
 
 cat > src/documents/DocumentsPage.tsx <<'FIN_DU_FICHIER'
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { allocateNumber, isSyncActive } from '../sync/runtime'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { isSyncActive, runDocAction } from '../sync/runtime'
 import type { Product } from '../types'
 import { useAccess } from '../access/context'
 import DocumentEditor from './DocumentEditor'
@@ -1323,6 +1346,7 @@ import DocumentPrint from './DocumentPrint'
 import PaymentDialog from './PaymentDialog'
 import ReminderPrint from './ReminderPrint'
 import { downloadCsv, journal } from './csv'
+import { readDocuments } from './storage'
 import { balanceOf, isActive, isOverdue, paidAmount, sign } from './ledger'
 import { addDays, finalNumber, frDate, newDocument, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
@@ -1345,7 +1369,8 @@ import './documents.css'
 interface Props {
   kind: DocKind
   documents: CommercialDocument[]
-  onChange: (docs: CommercialDocument[]) => void
+  /** Accepte une mise à jour fonctionnelle (appliquée à la liste la plus récente, même après une attente réseau) */
+  onChange: Dispatch<SetStateAction<CommercialDocument[]>>
   products: Product[]
   lots: StockLot[]
   kits: Kit[]
@@ -1491,72 +1516,67 @@ export default function DocumentsPage({
     setView({ mode: 'list' })
   }
 
-  // Pièces les plus récentes (la synchronisation peut en apporter pendant une attente réseau)
+  // Pièces les plus récentes (la synchronisation peut en apporter pendant une attente réseau ;
+  // si la page a été quittée entre-temps, on relit le stockage)
   const docsRef = useRef(documents)
+  const mounted = useRef(true)
   useEffect(() => {
     docsRef.current = documents
   }, [documents])
+  useEffect(() => {
+    mounted.current = true
+    return () => {
+      mounted.current = false
+    }
+  }, [])
   const [validating, setValidating] = useState<string | null>(null)
 
   async function setStatus(doc: CommercialDocument, status: DocStatus) {
-    if (status === 'validated' && doc.status === 'draft' && isSyncActive()) {
-      // Multi-postes : le numéro définitif vient du serveur, pour qu'aucun autre poste ne puisse l'attribuer
-      const local = finalNumber(doc, documents)
-      const prefix = local.slice(0, local.lastIndexOf('-') + 1)
-      setValidating(doc.id)
-      let seq: number | null
-      try {
-        seq = await allocateNumber(doc.kind, Number(doc.date.slice(0, 4)), Number(local.slice(prefix.length)) - 1)
-      } catch {
-        alert(
-          'Validation impossible pour le moment : le numéro définitif est attribué par le serveur en mode multi-postes. Vérifiez la connexion Internet puis réessayez.',
-        )
-        return
-      } finally {
-        setValidating(null)
-      }
-      const latest = docsRef.current
-      const fresh = latest.find((d) => d.id === doc.id)
-      // Pièce supprimée ou déjà validée entre-temps (par exemple sur un autre poste)
-      if (!fresh || fresh.status !== 'draft') return
-      applyStatus(fresh, status, seq === null ? undefined : prefix + String(seq).padStart(4, '0'), latest)
-      return
+    const validate = status === 'validated' && doc.status === 'draft'
+    const cancel = status === 'cancelled' && doc.status !== 'draft'
+    if (!isSyncActive() || (!validate && !cancel)) return applyStatus(doc, status, undefined, documents)
+    // Multi-postes : le serveur n'accorde l'opération qu'à un seul poste (numéro définitif, mouvements de stock)
+    const local = finalNumber(doc, documents)
+    const prefix = local.slice(0, local.lastIndexOf('-') + 1)
+    setValidating(doc.id)
+    try {
+      const outcome = await runDocAction(
+        {
+          docId: doc.id,
+          action: validate ? 'validate' : 'cancel',
+          kind: doc.kind,
+          year: Number(doc.date.slice(0, 4)),
+          min: Number(local.slice(prefix.length)) - 1,
+        },
+        (seq) => {
+          const latest = mounted.current ? docsRef.current : (readDocuments() ?? docsRef.current)
+          const fresh = latest.find((d) => d.id === doc.id)
+          // Pièce supprimée ou déjà passée à un autre état entre-temps
+          if (!fresh || fresh.status !== doc.status) return
+          applyStatus(fresh, status, validate && seq !== null ? prefix + String(seq).padStart(4, '0') : undefined, latest)
+        },
+      )
+      if (outcome === 'already')
+        alert(`Cette pièce vient d'être ${validate ? 'validée' : 'annulée'} sur un autre poste : elle sera à jour ici dans quelques secondes.`)
+    } catch {
+      alert(
+        `${validate ? 'Validation' : 'Annulation'} impossible pour le moment : en mode multi-postes, le serveur doit confirmer l'opération (pour éviter un numéro ou un mouvement de stock en double). Vérifiez la connexion Internet puis réessayez.`,
+      )
+    } finally {
+      if (mounted.current) setValidating(null)
     }
-    applyStatus(doc, status, undefined, documents)
   }
 
   function applyStatus(doc: CommercialDocument, status: DocStatus, forcedNumber: string | undefined, documents: CommercialDocument[]) {
     // Validation : numéro définitif, à la suite des pièces déjà validées (aucun trou possible)
     const number = forcedNumber ?? (status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number)
-    let next = documents.map((d) =>
-      d.id === doc.id ? { ...d, status, number, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
-    )
-    // Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
-    const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
-    // (pas en multi-postes : ce brouillon peut appartenir à un autre poste, on ne le touche pas)
-    if (clash && !isSyncActive()) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
-    if (number !== doc.number) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
+    if (number !== doc.number && mounted.current) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
     access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${number} · ${doc.party.name}`)
     const supplier = doc.party.name
+    let moved: Record<string, number> | null = null
 
     if (status === 'validated') {
-      if (doc.kind === 'delivery') {
-        const moved = onStockMove?.(doc.lines, -1, '', number) ?? {}
-        // On retient la quantité réellement sortie (pour une annulation exacte) ;
-        // BL en dépôt : chaque ligne reste à facturer à la pose
-        next = next.map((d) =>
-          d.id === doc.id
-            ? {
-                ...d,
-                lines: d.lines.map((l) => ({
-                  ...l,
-                  movedQty: moved[l.id] ?? l.quantity,
-                  depot: doc.consignment ? (l.depot ?? 'depot') : l.depot,
-                })),
-              }
-            : d,
-        )
-      }
+      if (doc.kind === 'delivery') moved = onStockMove?.(doc.lines, -1, '', number) ?? {}
       if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, number)
       if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', number)
     }
@@ -1571,7 +1591,30 @@ export default function DocumentsPage({
         )
       if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1, '', `Annulation ${doc.number}`)
     }
-    onChange(next)
+
+    const by = stamp().by
+    const multi = isSyncActive()
+    // Mise à jour appliquée à la liste la plus récente (rien de ce qui a changé entre-temps n'est perdu)
+    onChange((prev) => {
+      let next = prev.map((d) => {
+        if (d.id !== doc.id) return d
+        const updated: CommercialDocument = { ...d, status, number, ...(status === 'validated' ? { validatedBy: by } : {}) }
+        // BL : on retient la quantité réellement sortie (pour une annulation exacte) ;
+        // BL en dépôt : chaque ligne reste à facturer à la pose
+        if (moved)
+          updated.lines = d.lines.map((l) => ({
+            ...l,
+            movedQty: moved[l.id] ?? l.quantity,
+            depot: doc.consignment ? (l.depot ?? 'depot') : l.depot,
+          }))
+        return updated
+      })
+      // Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
+      // (pas en multi-postes : ce brouillon peut appartenir à un autre poste, on ne le touche pas)
+      const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
+      if (clash && !multi) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
+      return next
+    })
   }
 
   function addPayment(doc: CommercialDocument, payment: Payment) {
@@ -5315,6 +5358,16 @@ const isPartyList = listOf<PartyRecord>(
   (x) => isObj(x) && typeof x.id === 'string' && typeof x.name === 'string' && (x.role === 'client' || x.role === 'supplier'),
 )
 
+/** Pièces telles qu'enregistrées (lecture directe, hors React : après une attente réseau) */
+export function readDocuments(): CommercialDocument[] | null {
+  try {
+    const data: unknown = JSON.parse(localStorage.getItem(DOCS_KEY) ?? 'null')
+    return isDocumentList(data) ? data : null
+  } catch {
+    return null
+  }
+}
+
 export const useDocuments = () => usePersistentState<CommercialDocument[]>(DOCS_KEY, () => [], isDocumentList)
 export const useCompany = () => usePersistentState<CompanyInfo>(COMPANY_KEY, emptyCompany, isCompany)
 export const useLots = () => usePersistentState<StockLot[]>(LOTS_KEY, () => [], isLotList)
@@ -8198,8 +8251,11 @@ export interface CollectionSpec {
   /** Nombre maximum d'éléments gardés sur ce poste (les plus récents selon sortKey) */
   maxLocal?: number
   sortKey?: string
-  /** Fusion de deux versions modifiées en parallèle (préférée, autre) */
-  merge?: (preferred: unknown, other: unknown) => unknown
+  /**
+   * Règles métier de fusion : local = version de ce poste, remote = version serveur,
+   * base = dernière version commune (absente si ce poste n'a rien modifié : la version serveur est alors préférée)
+   */
+  merge?: (local: unknown, remote: unknown, base: unknown | undefined) => { result: unknown; conflict: boolean }
   /** Enregistrement qu'une suppression venue d'ailleurs ne doit pas effacer */
   protect?: (record: unknown) => boolean
   /** Compteurs : en cas de modification sur deux postes, les variations s'additionnent (stock, quantité) */
@@ -8225,6 +8281,9 @@ export const COLLECTIONS: CollectionSpec[] = [
 ]
 
 export const VALUE_ID = '_'
+
+/** Le navigateur refuse d'enregistrer : rien n'est marqué comme reçu, tout sera réappliqué plus tard */
+export class StorageFullError extends Error {}
 
 type Rec = Record<string, unknown> & { id: string }
 
@@ -8295,8 +8354,14 @@ export function writeLocal(spec: CollectionSpec, records: Map<string, unknown>, 
     } else next = JSON.stringify(list)
   }
   if (next === oldValue) return
-  if (next === null) localStorage.removeItem(spec.key)
-  else localStorage.setItem(spec.key, next)
+  try {
+    if (next === null) localStorage.removeItem(spec.key)
+    else localStorage.setItem(spec.key, next)
+  } catch {
+    throw new StorageFullError(
+      'Stockage du navigateur plein : les modifications des autres postes ne peuvent plus être enregistrées ici. Libérez de la place (Paramètres › Sauvegarde) puis rechargez la page.',
+    )
+  }
   window.dispatchEvent(new StorageEvent('storage', { key: spec.key, oldValue, newValue: next, storageArea: localStorage }))
 }
 
@@ -8305,60 +8370,7 @@ export function localOrder(spec: CollectionSpec): string[] {
   return [...readLocal(spec).keys()]
 }
 
-/** JSON à clés triées : deux objets égaux donnent toujours le même texte (le serveur réordonne les clés) */
-export function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
-  if (Array.isArray(value)) return '[' + value.map((v) => (v === undefined ? 'null' : stableStringify(v))).join(',') + ']'
-  const obj = value as Record<string, unknown>
-  const keys = Object.keys(obj)
-    .filter((k) => obj[k] !== undefined)
-    .sort()
-  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
-}
-
-/** Empreinte courte d'un enregistrement (FNV-1a 32 bits + longueur) */
-export function fingerprint(value: unknown): string {
-  const s = stableStringify(value)
-  let h = 0x811c9dc5
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
-  return h.toString(36) + '.' + s.length.toString(36)
-}
-
-const same = (a: unknown, b: unknown) => stableStringify(a) === stableStringify(b)
-
-/**
- * Fusion à trois versions, champ par champ : base = dernière version serveur connue,
- * local = version de ce poste, remote = nouvelle version serveur.
- * - champ changé d'un seul côté : ce changement est gardé ;
- * - compteur changé des deux côtés : les deux variations s'additionnent (10 → 8 ici, 10 → 7 ailleurs : 5) ;
- * - autre champ changé des deux côtés : la version de ce poste l'emporte (conflit compté).
- */
-export function threeWayMerge(
-  base: unknown,
-  local: unknown,
-  remote: unknown,
-  deltaFields: string[] = [],
-): { result: unknown; conflict: boolean } {
-  const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
-  if (!isObj(base) || !isObj(local) || !isObj(remote)) return { result: local, conflict: true }
-  const out: Record<string, unknown> = {}
-  let conflict = false
-  for (const key of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
-    const b = base[key]
-    const l = local[key]
-    const r = remote[key]
-    let v: unknown
-    if (same(l, b)) v = r
-    else if (same(r, b) || same(l, r)) v = l
-    else if (deltaFields.includes(key) && typeof b === 'number' && typeof l === 'number' && typeof r === 'number') v = r + (l - b)
-    else {
-      v = l
-      conflict = true
-    }
-    if (v !== undefined) out[key] = v
-  }
-  return { result: out, conflict }
-}
+export { fingerprint, stableStringify, threeWayMerge } from './json'
 FIN_DU_FICHIER
 echo "OK src/sync/collections.ts"
 
@@ -8438,14 +8450,37 @@ export function decodeInvite(code: string): Pick<SyncConfig, 'url' | 'anonKey' |
 
 /** Identifiant de dossier : minuscules, chiffres et tirets */
 export const isValidDossier = (d: string) => /^[a-z0-9][a-z0-9-]{1,40}$/.test(d)
+
+const DEVICE_KEY = 'profitpilot-sync:device'
+
+/** Identifiant de ce navigateur (fixe), pour reconnaître ses propres actions après une coupure */
+export function deviceId(): string {
+  try {
+    const existing = localStorage.getItem(DEVICE_KEY)
+    if (existing) return existing
+    const id = randomId()
+    localStorage.setItem(DEVICE_KEY, id)
+    return id
+  } catch {
+    return 'memoire-' + randomId()
+  }
+}
+
+export function randomId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+}
 FIN_DU_FICHIER
 echo "OK src/sync/config.ts"
 
 cat > src/sync/engine.ts <<'FIN_DU_FICHIER'
 // Moteur de synchronisation : envoie les modifications de ce poste, applique celles des autres postes.
-// Granularité : l'enregistrement (une pièce, un client, un lot…), dernier enregistré gagnant.
-import { COLLECTIONS, VALUE_ID, fingerprint, localOrder, readLocal, threeWayMerge, writeLocal, type CollectionSpec } from './collections'
-import { AuthError, OfflineError, SupabaseRemote, type RemoteRow } from './remote'
+// Granularité : l'enregistrement (une pièce, un client, un lot…). Le serveur arbitre : un envoi fait sur une
+// version périmée est refusé et renvoyé ; le poste fusionne puis renvoie. Rien n'est écrasé en silence.
+import { deviceId, randomId } from './config'
+import { COLLECTIONS, VALUE_ID, fingerprint, readLocal, threeWayMerge, writeLocal, type CollectionSpec } from './collections'
+import { StorageFullError } from './collections'
+import { AuthError, OfflineError, PushError, SupabaseRemote, type Claim, type PushResult, type PushRow, type RemoteRow } from './remote'
 import { emptyState, loadState, saveState, type SyncState } from './state'
 
 export type SyncPhase = 'idle' | 'syncing' | 'ok' | 'offline' | 'auth' | 'error'
@@ -8456,7 +8491,7 @@ export interface SyncStatus {
   lastSync: number | null
   /** Modifications locales pas encore envoyées */
   pending: number
-  /** Modifications des deux côtés sur un même enregistrement : la version de ce poste a été gardée */
+  /** Modifications des deux côtés sur un même champ : la version de ce poste a été gardée */
   conflicts: number
   message: string
 }
@@ -8466,14 +8501,20 @@ const keyOf = (collection: string, id: string) => collection + SEP + id
 /** Marge de relecture : une ligne validée côté serveur juste avant notre lecture peut porter une date un peu antérieure */
 const OVERLAP_MS = 15_000
 const INTERVAL_MS = 4_000
+/** Envois refusés (modifiés ailleurs entre-temps) : fusion puis nouvel envoi, au plus 3 fois par synchro */
+const MAX_ROUNDS = 3
+/** Envois sans réponse gardés par enregistrement */
+const MAX_PENDING = 5
 
 const minus = (iso: string, ms: number) => new Date(new Date(iso).getTime() - ms).toISOString()
 /** Comparaison de dates serveur par leur valeur (indépendante du fuseau renvoyé) */
 const isLater = (a: string, b: string | null) => !b || new Date(a).getTime() > new Date(b).getTime()
+const hashOf = (x: unknown) => (x === undefined ? undefined : fingerprint(x))
 
 export class SyncEngine {
   readonly remote: SupabaseRemote
   private readonly dossier: string
+  private readonly device: string
   private state: SyncState = emptyState()
   private loaded = false
   private busy: Promise<void> | null = null
@@ -8481,12 +8522,13 @@ export class SyncEngine {
   private listeners = new Set<(s: SyncStatus) => void>()
   status: SyncStatus = { phase: 'idle', lastSync: null, pending: 0, conflicts: 0, message: '' }
 
-  constructor(remote: SupabaseRemote, dossier: string) {
+  constructor(remote: SupabaseRemote, dossier: string, device = deviceId()) {
     this.remote = remote
     this.dossier = dossier
+    this.device = device
   }
 
-  /** Mémorise la version serveur connue d'un enregistrement (empreinte + copie pour la fusion) */
+  /** Mémorise la version serveur de référence d'un enregistrement (empreinte + copie pour la fusion) */
   private remember(k: string, data: unknown | undefined) {
     if (data === undefined) {
       delete this.state.base[k]
@@ -8510,6 +8552,8 @@ export class SyncEngine {
 
   private releaseLock: (() => void) | null = null
   private stopped = false
+  /** Un autre onglet de ce poste synchronise : celui-ci attend son tour et ne synchronise pas */
+  private waiting = false
 
   /**
    * Démarre la synchro automatique. Plusieurs onglets ouverts sur le même poste : un seul synchronise
@@ -8520,7 +8564,9 @@ export class SyncEngine {
     this.setStatus({ phase: 'idle', message: 'Synchronisé par un autre onglet ouvert sur ce poste' })
     const locks = (navigator as Navigator & { locks?: LockManager }).locks
     if (!locks) return this.beginLoop()
+    this.waiting = true
     void locks.request(`profitpilot-sync:${this.dossier}`, () => {
+      this.waiting = false
       if (this.stopped) return
       this.beginLoop()
       return new Promise<void>((resolve) => {
@@ -8560,6 +8606,7 @@ export class SyncEngine {
 
   /** Une seule synchronisation à la fois ; un appel pendant une synchro attend la fin de celle-ci */
   syncNow(): Promise<void> {
+    if (this.waiting) return Promise.resolve()
     this.busy ??= this.run().finally(() => {
       this.busy = null
     })
@@ -8569,17 +8616,11 @@ export class SyncEngine {
   private async run() {
     this.setStatus({ phase: this.status.phase === 'ok' ? 'ok' : 'syncing' })
     try {
-      await this.ensureLoaded()
-      const since = this.state.lastPull ? minus(this.state.lastPull, OVERLAP_MS) : null
-      this.applyRemote(await this.remote.pull(since))
-      const changes = this.localChanges()
-      if (changes.length) {
-        await this.remote.push(changes.map((c) => c.row))
-        for (const c of changes) this.remember(c.k, c.row.deleted ? undefined : c.row.data)
-      }
-      await saveState(this.dossier, this.state)
+      await this.cycle()
       this.setStatus({ phase: 'ok', lastSync: Date.now(), pending: 0, message: '' })
     } catch (e) {
+      // Ce qui a été reçu et confirmé avant l'erreur reste acquis
+      if (this.loaded) await saveState(this.dossier, this.state)
       const pending = this.loaded ? this.localChanges().length : 0
       if (e instanceof OfflineError) this.setStatus({ phase: 'offline', pending, message: 'Hors ligne : les modifications partiront au retour de la connexion.' })
       else if (e instanceof AuthError) this.setStatus({ phase: 'auth', pending, message: `Connexion refusée : ${e.message}` })
@@ -8587,15 +8628,88 @@ export class SyncEngine {
     }
   }
 
-  /** Applique les lignes reçues, sauf sur un enregistrement modifié localement et pas encore envoyé */
-  private applyRemote(rows: RemoteRow[]) {
+  /** Une synchronisation : réception, puis envoi conditionnel (refus → fusion → nouvel envoi) */
+  private async cycle() {
+    await this.ensureLoaded()
+    const since = this.state.lastPull ? minus(this.state.lastPull, OVERLAP_MS) : null
+    await this.receive(await this.remote.pull(since), true)
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const changes = this.localChanges()
+      if (changes.length === 0) break
+      const rows: PushRow[] = changes.map((c) => ({ ...c.row, rev: `${this.device}.${randomId()}`, expected: this.state.seen[c.k] ?? null }))
+      // Envoi noté avant de partir : si la réponse se perd, on reconnaîtra notre écriture à la relecture.
+      // Une écriture réussie est toujours relue avant l'envoi suivant : quelques envois en attente suffisent.
+      for (const r of rows) {
+        const k = keyOf(r.collection, r.id)
+        this.state.pending[k] = [...(this.state.pending[k] ?? []), { rev: r.rev, data: r.deleted ? null : r.data, deleted: r.deleted }].slice(-MAX_PENDING)
+      }
+      await saveState(this.dossier, this.state)
+      const sent = new Map(rows.map((r) => [keyOf(r.collection, r.id), r]))
+      let result: PushResult
+      try {
+        result = await this.remote.push(rows)
+      } catch (e) {
+        // Paquets déjà écrits avant l'erreur : confirmés tout de suite
+        if (!(e instanceof PushError)) throw e
+        this.confirm(e.partial.accepted, sent)
+        throw e.original
+      }
+      this.confirm(result.accepted, sent)
+      if (result.rejected.length === 0) break
+      // Refusé : notre envoi n'a pas été écrit ; on fusionne avec la version serveur avant de renvoyer
+      for (const row of result.rejected) {
+        const k = keyOf(row.collection, row.id)
+        const rev = sent.get(k)?.rev
+        const list = this.state.pending[k]?.filter((p) => p.rev !== rev)
+        if (list?.length) this.state.pending[k] = list
+        else delete this.state.pending[k]
+      }
+      await this.receive(result.rejected)
+    }
+    await saveState(this.dossier, this.state)
+  }
+
+  /** Envois écrits par le serveur : ils deviennent la version de référence */
+  private confirm(accepted: PushResult['accepted'], sent: Map<string, PushRow>) {
+    for (const a of accepted) {
+      const k = keyOf(a.collection, a.id)
+      const r = sent.get(k)
+      if (!r) continue
+      this.remember(k, r.deleted ? undefined : r.data)
+      this.state.seen[k] = a.updated_at
+      delete this.state.pending[k]
+    }
+  }
+
+  /**
+   * Prépare puis applique des lignes reçues du serveur. Seule une lecture complète (fromPull) fait avancer
+   * la date de dernière lecture : une ligne refusée à l'envoi peut être plus récente que d'autres pas encore lues.
+   */
+  private async receive(rows: RemoteRow[], fromPull = false) {
     if (rows.length === 0) return
+    // Envoi sans réponse (coupure) puis ligne réécrite par un autre poste : le serveur dit si notre envoi a été écrit
+    const unknown: string[] = []
+    for (const r of rows) {
+      const k = keyOf(r.collection, r.id)
+      const pending = this.state.pending[k]
+      if (pending && r.updated_at !== this.state.seen[k] && !pending.some((p) => p.rev === r.rev)) unknown.push(...pending.map((p) => p.rev))
+    }
+    this.applyRemote(rows, await this.remote.appliedRevs(unknown), fromPull)
+  }
+
+  /**
+   * Applique les lignes reçues en respectant les modifications de ce poste pas encore envoyées.
+   * L'état (versions de référence) n'avance qu'une fois les données écrites dans le navigateur :
+   * si le stockage est plein, rien n'est perdu, tout sera réappliqué à la synchro suivante.
+   */
+  private applyRemote(rows: RemoteRow[], applied: Set<string>, fromPull: boolean) {
     const bySpec = new Map<string, RemoteRow[]>()
+    let lastPull = this.state.lastPull
     for (const r of rows) {
       const list = bySpec.get(r.collection) ?? []
       list.push(r)
       bySpec.set(r.collection, list)
-      if (r.updated_at && isLater(r.updated_at, this.state.lastPull)) this.state.lastPull = r.updated_at
+      if (fromPull && r.updated_at && isLater(r.updated_at, lastPull)) lastPull = r.updated_at
     }
     let conflicts = this.status.conflicts
     // Les collections qui partagent une clé (articles et leur méta) sont écrites l'une après l'autre
@@ -8603,75 +8717,96 @@ export class SyncEngine {
       const incoming = bySpec.get(spec.name)
       if (!incoming) continue
       const local = readLocal(spec)
-      const order = localOrder(spec)
+      const order = [...local.keys()]
       let changed = false
+      const accepted: { k: string; row: RemoteRow }[] = []
       for (const row of incoming) {
         const k = keyOf(spec.name, row.id)
         if (row.updated_at && this.state.seen[k] === row.updated_at) continue
-        if (row.updated_at) this.state.seen[k] = row.updated_at
+        accepted.push({ k, row })
         if (row.deleted && spec.appendOnly) continue
-        const current = local.get(row.id)
-        const localHash = current === undefined ? undefined : fingerprint(current)
-        const remoteHash = row.deleted ? undefined : fingerprint(row.data)
-        if (localHash === remoteHash) {
-          this.remember(k, row.deleted ? undefined : row.data)
-          continue
+
+        // Version de référence : la dernière reçue, ou notre propre envoi s'il a été écrit sans que nous le sachions
+        let base: string | undefined = this.state.base[k]
+        let snapshot = this.state.snapshot[k]
+        let known = k in this.state.base || k in this.state.seen
+        const mine = [...(this.state.pending[k] ?? [])].reverse().find((p) => p.rev === row.rev || applied.has(p.rev))
+        if (mine) {
+          base = mine.deleted ? undefined : fingerprint(mine.data)
+          snapshot = mine.deleted ? undefined : mine.data
+          known = true
         }
-        // Modifié sur ce poste depuis la dernière version synchronisée
-        const dirty = localHash !== this.state.base[k]
+
+        const current = local.get(row.id)
+        const localHash = hashOf(current)
+        const remoteHash = row.deleted ? undefined : fingerprint(row.data)
+        // Modifié sur ce poste depuis la version de référence
+        const dirty = known && localHash !== base
         let result: unknown
-        if (row.deleted) {
+        if (!known) {
+          // Jamais vu sur ce poste (réglage créé sur deux postes, état de synchro perdu) : la version en ligne fait foi
+          if (row.deleted) result = current !== undefined && spec.protect?.(current) ? current : undefined
+          else if (current !== undefined && spec.merge) result = spec.merge(current, row.data, undefined).result
+          else result = row.data
+          if (current !== undefined && hashOf(result) !== localHash) conflicts++
+        } else if (localHash === remoteHash && !(dirty && spec.deltaFields)) {
+          result = current
+        } else if (row.deleted) {
           if (current !== undefined && spec.protect?.(current)) result = current // pièce validée : on la garde et on la renvoie
-          else if (dirty) {
+          else if (dirty && current !== undefined) {
             conflicts++ // modifié ici, supprimé ailleurs : la modification l'emporte
-            continue
+            result = current
           } else result = undefined
         } else if (current === undefined) {
           if (dirty && !spec.protect?.(row.data)) {
             conflicts++ // supprimé ici, modifié ailleurs : la suppression l'emporte
-            continue
-          }
-          result = row.data
+            result = undefined
+          } else result = row.data
         } else if (spec.merge) {
           // Règles métier : jamais de retour en arrière d'une pièce, règlements additionnés
-          result = dirty ? spec.merge(current, row.data) : spec.merge(row.data, current)
-          if (dirty) conflicts++
-        } else if (dirty) {
-          // Modifié des deux côtés : fusion champ par champ à partir de la dernière version commune
-          const base = this.state.snapshot[k]
-          if (base === undefined) {
-            conflicts++ // pas de version commune : la version de ce poste sera envoyée
-            continue
-          }
-          const merged = threeWayMerge(base, current, row.data, spec.deltaFields)
+          const merged = spec.merge(current, row.data, dirty ? snapshot : undefined)
           if (merged.conflict) conflicts++
           result = merged.result
+        } else if (dirty) {
+          // Modifié des deux côtés : fusion champ par champ à partir de la dernière version commune
+          if (snapshot === undefined) {
+            conflicts++
+            result = row.data
+          } else {
+            const merged = threeWayMerge(snapshot, current, row.data, spec.deltaFields)
+            if (merged.conflict) conflicts++
+            result = merged.result
+          }
         } else result = row.data
 
-        // La version serveur devient la référence ; si le résultat en diffère, il sera renvoyé
-        this.remember(k, row.deleted ? undefined : row.data)
+        // Si le résultat diffère de la version serveur, il sera envoyé (sur la base de cette version)
         if (result === undefined) {
           if (local.delete(row.id)) changed = true
-        } else if (fingerprint(result) !== localHash) {
+        } else if (hashOf(result) !== localHash) {
           if (!local.has(row.id)) order.push(row.id)
           local.set(row.id, result)
           changed = true
         }
       }
-      if (changed) writeLocal(spec, local, order)
+      if (changed) writeLocal(spec, local, order) // StorageFullError : rien n'est marqué comme reçu
+      for (const { k, row } of accepted) {
+        this.remember(k, row.deleted ? undefined : row.data)
+        if (row.updated_at) this.state.seen[k] = row.updated_at
+        delete this.state.pending[k]
+      }
     }
+    this.state.lastPull = lastPull
     if (conflicts !== this.status.conflicts) this.setStatus({ conflicts })
   }
 
-  /** Enregistrements locaux différents de leur dernière version synchronisée */
-  private localChanges(): { k: string; hash: string | undefined; row: RemoteRow }[] {
-    const out: { k: string; hash: string | undefined; row: RemoteRow }[] = []
+  /** Enregistrements locaux différents de leur version de référence */
+  private localChanges(): { k: string; row: RemoteRow }[] {
+    const out: { k: string; row: RemoteRow }[] = []
     for (const spec of COLLECTIONS) {
       const local = readLocal(spec)
       for (const [id, data] of local) {
         const k = keyOf(spec.name, id)
-        const hash = fingerprint(data)
-        if (this.state.base[k] !== hash) out.push({ k, hash, row: { collection: spec.name, id, data, deleted: false } })
+        if (this.state.base[k] !== fingerprint(data)) out.push({ k, row: { collection: spec.name, id, data, deleted: false } })
       }
       if (spec.appendOnly) continue
       // Supprimé sur ce poste depuis la dernière synchro : on propage la suppression
@@ -8679,7 +8814,7 @@ export class SyncEngine {
       for (const k of Object.keys(this.state.base)) {
         if (!k.startsWith(prefix)) continue
         const id = k.slice(prefix.length)
-        if (!local.has(id)) out.push({ k, hash: undefined, row: { collection: spec.name, id, data: null, deleted: true } })
+        if (!local.has(id)) out.push({ k, row: { collection: spec.name, id, data: null, deleted: true } })
       }
     }
     return out
@@ -8689,16 +8824,18 @@ export class SyncEngine {
     return this.loaded ? this.localChanges().length : 0
   }
 
+  /** Action unique sur une pièce (validation, annulation…) : un seul poste l'obtient */
+  claim(docId: string, action: string, kind: string, year: number, min: number): Promise<Claim> {
+    return this.remote.claim(docId, action, this.device, kind, year, min)
+  }
+
   /** Premier poste : envoie toutes les données locales vers un dossier en ligne vide */
   async uploadAll(): Promise<number> {
     this.state = emptyState()
     this.loaded = true
-    const changes = this.localChanges()
-    await this.remote.push(changes.map((c) => c.row))
-    for (const c of changes) if (!c.row.deleted) this.remember(c.k, c.row.data)
-    // La relecture suivante reprendra nos propres envois (sans effet : empreintes identiques)
-    await saveState(this.dossier, this.state)
-    return changes.length
+    const count = this.localChanges().length
+    await this.cycle()
+    return count
   }
 
   /** Nouveau poste : remplace les données locales par celles du dossier en ligne */
@@ -8725,10 +8862,8 @@ export class SyncEngine {
         state.snapshot[keyOf(spec.name, r.id)] = r.data
         count++
       }
-      // Collection absente en ligne : on l'efface localement (sauf réglages sans valeur en ligne)
-      if (records.size === 0 && spec.kind === 'value') {
-        if (!bySpec.has(spec.name)) continue
-      }
+      // Réglage absent en ligne : on garde celui de ce poste (il sera envoyé)
+      if (records.size === 0 && spec.kind === 'value' && !bySpec.has(spec.name)) continue
       writeLocal(spec, records, order)
     }
     this.state = state
@@ -8740,14 +8875,78 @@ export class SyncEngine {
 
 /** Valeur « _ » d'une collection de type value : exportée pour les tests */
 export const VALUE_RECORD_ID = VALUE_ID
+export { StorageFullError }
 export type { CollectionSpec }
 FIN_DU_FICHIER
 echo "OK src/sync/engine.ts"
+
+cat > src/sync/json.ts <<'FIN_DU_FICHIER'
+// Comparaison et fusion d'enregistrements JSON (sans dépendance : utilisable partout)
+
+/** JSON à clés triées : deux objets égaux donnent toujours le même texte (le serveur réordonne les clés) */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return '[' + value.map((v) => (v === undefined ? 'null' : stableStringify(v))).join(',') + ']'
+  const obj = value as Record<string, unknown>
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
+}
+
+/** Empreinte courte d'un enregistrement (FNV-1a 32 bits + longueur) */
+export function fingerprint(value: unknown): string {
+  const s = stableStringify(value)
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
+  return h.toString(36) + '.' + s.length.toString(36)
+}
+
+export const same = (a: unknown, b: unknown) => stableStringify(a) === stableStringify(b)
+
+/**
+ * Fusion à trois versions, champ par champ : base = dernière version serveur connue,
+ * local = version de ce poste, remote = nouvelle version serveur.
+ * - champ changé d'un seul côté : ce changement est gardé ;
+ * - compteur changé des deux côtés : les deux variations s'additionnent (10 → 8 ici, 10 → 7 ailleurs : 5) ;
+ * - autre champ changé des deux côtés : la version de ce poste l'emporte (conflit compté).
+ */
+export function threeWayMerge(
+  base: unknown,
+  local: unknown,
+  remote: unknown,
+  deltaFields: string[] = [],
+): { result: unknown; conflict: boolean } {
+  const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
+  if (!isObj(base) || !isObj(local) || !isObj(remote)) return { result: local, conflict: true }
+  const out: Record<string, unknown> = {}
+  let conflict = false
+  for (const key of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
+    const b = base[key]
+    const l = local[key]
+    const r = remote[key]
+    let v: unknown
+    if (same(l, b)) v = r
+    else if (same(r, b)) v = l
+    // Compteur avant l'égalité : deux sorties de 1 sur deux postes (10 → 9 ici, 10 → 9 ailleurs) donnent 8, pas 9
+    else if (deltaFields.includes(key) && typeof b === 'number' && typeof l === 'number' && typeof r === 'number') v = r + (l - b)
+    else if (same(l, r)) v = l
+    else {
+      v = l
+      conflict = true
+    }
+    if (v !== undefined) out[key] = v
+  }
+  return { result: out, conflict }
+}
+FIN_DU_FICHIER
+echo "OK src/sync/json.ts"
 
 cat > src/sync/merge.ts <<'FIN_DU_FICHIER'
 // Règles métier appliquées quand une pièce a changé sur deux postes à la fois
 import { computeTotals } from '../documents/tva'
 import type { CommercialDocument, DocStatus, Payment } from '../documents/types'
+import { threeWayMerge } from './json'
 
 /** Une pièce avance (brouillon → validée → réglée / annulée) et ne recule jamais */
 const RANK: Record<DocStatus, number> = { draft: 0, validated: 1, paid: 2, cancelled: 3 }
@@ -8759,24 +8958,35 @@ const rank = (d: CommercialDocument) => RANK[d.status] ?? 0
 
 /**
  * Fusion de deux versions d'une même pièce :
- * - la version la plus avancée l'emporte (une copie « brouillon » périmée n'annule jamais une validation) ;
- * - à avancement égal, la version préférée l'emporte ;
+ * - la version la plus avancée l'emporte entière (une copie « brouillon » périmée ne modifie jamais une pièce validée) ;
+ * - à avancement égal : sans modification sur ce poste (base absente) la version serveur est reprise,
+ *   sinon fusion champ par champ à partir de la dernière version commune ;
  * - les règlements des deux versions sont additionnés (deux encaissements saisis sur deux postes).
  */
-export function mergeDocument(preferred: unknown, other: unknown): unknown {
-  if (!isDoc(preferred) || !isDoc(other)) return preferred
-  const winner = rank(other) > rank(preferred) ? other : preferred
+export function mergeDocument(local: unknown, remote: unknown, base: unknown | undefined): { result: unknown; conflict: boolean } {
+  if (!isDoc(local) || !isDoc(remote)) return { result: base === undefined ? remote : local, conflict: base !== undefined }
+  let winner: CommercialDocument
+  let conflict = false
+  if (rank(local) !== rank(remote)) {
+    winner = rank(local) > rank(remote) ? local : remote
+    conflict = base !== undefined
+  } else if (base === undefined) winner = remote
+  else {
+    const merged = threeWayMerge(base, local, remote)
+    winner = merged.result as CommercialDocument
+    conflict = merged.conflict
+  }
   const payments = new Map<string, Payment>()
-  for (const p of [...(preferred.payments ?? []), ...(other.payments ?? [])]) if (!payments.has(p.id)) payments.set(p.id, p)
-  if (payments.size === 0) return winner
-  const merged = [...payments.values()].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
+  for (const p of [...(local.payments ?? []), ...(remote.payments ?? [])]) if (!payments.has(p.id)) payments.set(p.id, p)
+  if (payments.size === 0) return { result: winner, conflict }
+  const all = [...payments.values()].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
   // Deux acomptes saisis sur deux postes peuvent solder la facture à eux deux
-  const paid = merged.reduce((sum, p) => sum + p.amount, 0)
+  const paid = all.reduce((sum, p) => sum + p.amount, 0)
   const settled =
     (winner.kind === 'invoice' || winner.kind === 'bill') &&
     winner.status === 'validated' &&
     paid >= computeTotals(winner).netToPay - 0.01
-  return { ...winner, payments: merged, ...(settled ? { status: 'paid' as const } : {}) }
+  return { result: { ...winner, payments: all, ...(settled ? { status: 'paid' as const } : {}) }, conflict }
 }
 
 /** Une pièce validée ne peut pas être supprimée (seuls les brouillons le peuvent) */
@@ -8796,6 +9006,29 @@ export interface RemoteRow {
   deleted: boolean
   updated_at?: string
   updated_by?: string | null
+  /** Identifiant de l'envoi qui a écrit cette version */
+  rev?: string | null
+}
+
+/** Ligne à envoyer : expected = date serveur de la version sur laquelle le poste s'appuie (null = nouvelle ligne) */
+export interface PushRow extends RemoteRow {
+  rev: string
+  expected: string | null
+}
+
+export interface PushResult {
+  /** Lignes écrites, avec leur nouvelle date serveur */
+  accepted: { collection: string; id: string; updated_at: string }[]
+  /** Lignes refusées (modifiées entre-temps sur un autre poste) : version serveur actuelle, à fusionner */
+  rejected: RemoteRow[]
+}
+
+/** Résultat d'une action unique sur une pièce (validation, annulation, retour de dépôt) */
+export interface Claim {
+  /** Numéro définitif attribué par le serveur (validation) */
+  number: number | null
+  /** Action déjà faite par un autre poste : ne rien appliquer ici */
+  already: boolean
 }
 
 export interface Session {
@@ -8812,6 +9045,17 @@ export class OfflineError extends Error {}
 export class AuthError extends Error {}
 /** Erreur renvoyée par le serveur */
 export class RemoteError extends Error {}
+
+/** Envoi interrompu : les paquets déjà écrits (partial) sont à confirmer, puis l'erreur d'origine relancée */
+export class PushError extends Error {
+  readonly partial: PushResult
+  readonly original: Error
+  constructor(original: Error, partial: PushResult) {
+    super(original.message)
+    this.partial = partial
+    this.original = original
+  }
+}
 
 const PAGE = 1000
 const PUSH_CHUNK = 200
@@ -8942,46 +9186,71 @@ export class SupabaseRemote {
     return `dossier=eq.${encodeURIComponent(this.dossier)}`
   }
 
-  /** Lignes modifiées depuis une date (toutes si null), par pages de 1 000 */
+  private async rpc<T>(name: string, args: Record<string, unknown>): Promise<T> {
+    const res = await this.rest(`rpc/${name}`, { method: 'POST', body: JSON.stringify({ p_dossier: this.dossier, ...args }) })
+    return (await res.json()) as T
+  }
+
+  /**
+   * Lignes modifiées depuis une date (toutes si null), par pages de 1 000 lues à la suite de la dernière ligne reçue
+   * (date, collection, id) : une ligne modifiée pendant la lecture repasse en fin de liste, aucune n'est sautée.
+   */
   async pull(since: string | null): Promise<RemoteRow[]> {
     const rows: RemoteRow[] = []
-    for (let offset = 0; ; offset += PAGE) {
-      const params = [
-        'select=collection,id,data,deleted,updated_at,updated_by',
-        this.filter(),
-        since ? `updated_at=gte.${encodeURIComponent(since)}` : '',
-        'order=updated_at.asc,collection.asc,id.asc',
-        `limit=${PAGE}`,
-        `offset=${offset}`,
-      ].filter(Boolean)
-      const res = await this.rest(`records?${params.join('&')}`)
-      const page = (await res.json()) as RemoteRow[]
+    let after: RemoteRow | null = null
+    for (;;) {
+      const page: RemoteRow[] = await this.rpc<RemoteRow[]>('pull_records', {
+        p_since: since,
+        p_after_ts: after?.updated_at ?? null,
+        p_after_collection: after?.collection ?? null,
+        p_after_id: after?.id ?? null,
+        p_limit: PAGE,
+      })
       rows.push(...page)
       if (page.length < PAGE) return rows
+      after = page[page.length - 1]
     }
   }
 
-  /** Envoi (insertion ou mise à jour) par paquets d'au plus 200 lignes et ~400 Ko (images du papier à en-tête) */
-  async push(rows: RemoteRow[]): Promise<void> {
+  /**
+   * Envoi conditionnel par paquets d'au plus 200 lignes et ~400 Ko (images du papier à en-tête) :
+   * une ligne modifiée entre-temps sur un autre poste est refusée et renvoyée, jamais écrasée.
+   */
+  async push(rows: PushRow[]): Promise<PushResult> {
+    const result: PushResult = { accepted: [], rejected: [] }
     let chunk: string[] = []
     let size = 0
     const flush = async () => {
       if (!chunk.length) return
-      await this.rest('records', {
+      const res = await this.rest('rpc/push_records', {
         method: 'POST',
-        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-        body: '[' + chunk.join(',') + ']',
+        body: `{"p_dossier":${JSON.stringify(this.dossier)},"p_rows":[${chunk.join(',')}]}`,
       })
+      const part = (await res.json()) as Partial<PushResult>
+      result.accepted.push(...(part.accepted ?? []))
+      result.rejected.push(...(part.rejected ?? []))
       chunk = []
       size = 0
     }
-    for (const r of rows) {
-      const json = JSON.stringify({ dossier: this.dossier, collection: r.collection, id: r.id, data: r.data, deleted: r.deleted })
-      if (chunk.length && (chunk.length >= PUSH_CHUNK || size + json.length > PUSH_BYTES)) await flush()
-      chunk.push(json)
-      size += json.length
+    try {
+      for (const r of rows) {
+        const json = JSON.stringify({ collection: r.collection, id: r.id, data: r.data, deleted: r.deleted, rev: r.rev, expected: r.expected })
+        if (chunk.length && (chunk.length >= PUSH_CHUNK || size + json.length > PUSH_BYTES)) await flush()
+        chunk.push(json)
+        size += json.length
+      }
+      await flush()
+    } catch (e) {
+      if (result.accepted.length === 0 || !(e instanceof Error)) throw e
+      throw new PushError(e, result)
     }
-    await flush()
+    return result
+  }
+
+  /** Parmi ces envois (dont la réponse s'est perdue), ceux qui ont bien été écrits */
+  async appliedRevs(revs: string[]): Promise<Set<string>> {
+    if (revs.length === 0) return new Set()
+    return new Set(await this.rpc<string[]>('applied_revs', { p_revs: revs }))
   }
 
   /** Le compte connecté figure-t-il dans la liste des membres du dossier ? */
@@ -9000,16 +9269,22 @@ export class SupabaseRemote {
     return Number.isFinite(total) ? total : (await res.json()).length
   }
 
-  /** Prochain numéro de pièce, attribué par le serveur (aucun doublon entre postes) */
-  async nextNumber(kind: string, year: number, min: number): Promise<number> {
-    const res = await this.rest('rpc/next_number', {
-      method: 'POST',
-      body: JSON.stringify({ p_dossier: this.dossier, p_kind: kind, p_year: year, p_min: min }),
+  /**
+   * Action unique sur une pièce : un seul poste l'obtient (avec le numéro définitif pour une validation).
+   * Le même poste qui redemande après une coupure retrouve la même action et le même numéro.
+   */
+  async claim(docId: string, action: string, device: string, kind: string, year: number, min: number): Promise<Claim> {
+    const value = await this.rpc<{ number?: unknown; already?: unknown }>('claim_doc_action', {
+      p_doc_id: docId,
+      p_action: action,
+      p_device: device,
+      p_kind: kind,
+      p_year: year,
+      p_min: min,
     })
-    const value = (await res.json()) as unknown
-    const n = Number(value)
-    if (!Number.isInteger(n) || n < 1) throw new RemoteError('Numéro invalide reçu du serveur')
-    return n
+    const n = value.number === null || value.number === undefined ? null : Number(value.number)
+    if (n !== null && (!Number.isInteger(n) || n < 1)) throw new RemoteError('Numéro invalide reçu du serveur')
+    return { number: n, already: value.already === true }
   }
 }
 FIN_DU_FICHIER
@@ -9074,13 +9349,58 @@ export function isSyncActive(): boolean {
   return engine !== null && loadConfig()?.joined === true
 }
 
+/** Relance une synchronisation dès que possible (sans effet si un autre onglet de ce poste synchronise) */
+export function syncSoon() {
+  void engine?.syncNow()
+}
+
+const DONE_KEY = 'profitpilot-sync:done-actions'
+
+function doneActions(): string[] {
+  try {
+    const list: unknown = JSON.parse(localStorage.getItem(DONE_KEY) ?? '[]')
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
+
 /**
- * Numéro définitif attribué par le serveur (null en mode un seul poste).
- * Lève une erreur hors ligne : on ne valide pas de pièce sans numéro partagé, pour éviter tout doublon.
+ * Action unique sur une pièce (validation, annulation, retour de dépôt) en mode multi-postes :
+ * le serveur ne l'accorde qu'à un seul poste (et attribue le numéro définitif d'une validation) ;
+ * entre deux onglets du même poste, un verrou du navigateur et une marque locale évitent le doublon.
+ * En mode un seul poste, l'action est appliquée directement (numéro null).
+ * Renvoie 'already' si un autre poste ou onglet l'a déjà faite : rien n'est appliqué ici.
+ * Lève une erreur hors ligne : on n'agit pas sans l'accord du serveur.
  */
-export async function allocateNumber(kind: string, year: number, min: number): Promise<number | null> {
-  if (!isSyncActive() || !engine) return null
-  return engine.remote.nextNumber(kind, year, min)
+export async function runDocAction(
+  request: { docId: string; action: string; kind: string; year: number; min: number },
+  apply: (number: number | null) => void,
+): Promise<'applied' | 'already'> {
+  const config = loadConfig()
+  const current = engine
+  if (!current || !config?.joined) {
+    apply(null)
+    return 'applied'
+  }
+  const mark = `${config.dossier}:${request.docId}:${request.action}`
+  const run = async (): Promise<'applied' | 'already'> => {
+    if (doneActions().includes(mark)) return 'already'
+    const claim = await current.claim(request.docId, request.action, request.kind, request.year, request.min)
+    if (claim.already) {
+      syncSoon()
+      return 'already'
+    }
+    apply(claim.number)
+    try {
+      localStorage.setItem(DONE_KEY, JSON.stringify([...doneActions(), mark].slice(-300)))
+    } catch {
+      // stockage plein : seul le verrou protège encore les autres onglets
+    }
+    return 'applied'
+  }
+  const locks = (navigator as Navigator & { locks?: LockManager }).locks
+  return locks ? locks.request(`profitpilot-doc:${mark}`, run) : run()
 }
 
 export function useSyncStatus(): SyncStatus | null {
@@ -9098,21 +9418,30 @@ echo "OK src/sync/runtime.ts"
 cat > src/sync/state.ts <<'FIN_DU_FICHIER'
 // État de synchronisation de ce poste, rangé dans IndexedDB (pas dans le localStorage limité à 5 Mo)
 
+/** Envoi parti sans réponse sûre (coupure) : gardé pour reconnaître notre propre écriture à la relecture */
+export interface PendingPush {
+  rev: string
+  data: unknown
+  deleted: boolean
+}
+
 export interface SyncState {
   /** Empreinte de chaque enregistrement tel que synchronisé : « collection␟id » → empreinte */
   base: Record<string, string>
-  /** Date serveur de la dernière version vue : « collection␟id » → updated_at */
+  /** Date serveur de la version de référence (base) : « collection␟id » → updated_at, renvoyée à l'envoi */
   seen: Record<string, string>
   /** Date serveur la plus récente reçue */
   lastPull: string | null
   /** Dernière version serveur connue de chaque enregistrement (fusion à trois versions) */
   snapshot: Record<string, unknown>
+  /** Envois en attente de confirmation, par enregistrement (du plus ancien au plus récent) */
+  pending: Record<string, PendingPush[]>
 }
 
 const DB = 'profitpilot-sync'
 const STORE = 'kv'
 
-export const emptyState = (): SyncState => ({ base: {}, seen: {}, lastPull: null, snapshot: {} })
+export const emptyState = (): SyncState => ({ base: {}, seen: {}, lastPull: null, snapshot: {}, pending: {} })
 
 function open(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -9139,7 +9468,8 @@ export async function loadState(dossier: string): Promise<SyncState> {
 
 /**
  * Enregistre l'état. Si IndexedDB est indisponible (navigation privée…), l'état reste en mémoire :
- * la synchronisation continue, seul un rechargement de la page la fera repartir de zéro.
+ * la synchronisation continue ; après un rechargement, ce poste repart de la version en ligne
+ * (règle « jamais vu sur ce poste : la version en ligne fait foi »), sans rien écraser chez les autres.
  */
 export async function saveState(dossier: string, state: SyncState): Promise<void> {
   try {
@@ -9912,6 +10242,8 @@ export default function App() {
   const [partyId, setPartyId] = useState<string | undefined>()
   // Pièce à ouvrir directement en arrivant sur une page (après une conversion ou une facturation de dépôt)
   const [openId, setOpenId] = useState<string | undefined>()
+  // Chaque ouverture demandée (Créer, recherche, lien) repart d'une vue neuve, même sur la page déjà affichée
+  const [openSeq, setOpenSeq] = useState(0)
   const [products, setProducts] = useState<Product[]>(initial?.products ?? sampleProducts)
   const [isSampleData, setIsSampleData] = useState(initial?.isSampleData ?? true)
   const [fixedCosts, setFixedCosts] = useState<FixedCost[]>(loadFixedCosts)
@@ -10072,6 +10404,7 @@ export default function App() {
 
   function openDocument(kind: DocKind, id?: string) {
     setOpenId(id)
+    setOpenSeq((n) => n + 1)
     show(pageOfKind[kind])
   }
 
@@ -10371,7 +10704,7 @@ export default function App() {
         {page === 'decision' && <Decision products={products} />}
         {docKind && (
           <DocumentsPage
-            key={docKind + (openId ?? '')} // réinitialise la vue en changeant de page
+            key={`${docKind}:${openId ?? ''}:${openSeq}`} // réinitialise la vue en changeant de page ou à chaque ouverture
             kind={docKind}
             documents={documents}
             onChange={setDocuments}
@@ -10468,7 +10801,7 @@ echo "OK src/App.tsx"
 cat > supabase/schema.sql <<'FIN_DU_FICHIER'
 -- ProfitPilot ERP : préparation de la base en ligne (Supabase)
 -- À exécuter UNE fois : Supabase › SQL Editor › New query › coller ce fichier › Run.
--- Le script peut être relancé sans danger.
+-- Le script peut être relancé sans danger (après une mise à jour de ProfitPilot, recollez-le et relancez-le).
 
 -- 1. Membres : quels comptes (e-mails) ont accès à quel dossier
 create table if not exists public.members (
@@ -10488,7 +10821,9 @@ create table if not exists public.records (
   updated_by text,
   primary key (dossier, collection, id)
 );
-create index if not exists records_sync_idx on public.records (dossier, updated_at);
+create index if not exists records_sync_idx on public.records (dossier, updated_at, collection, id);
+-- Identifiant de chaque envoi : un poste reconnaît ses propres écritures, même après une réponse perdue
+alter table public.records add column if not exists rev text;
 
 -- 3. Compteurs de numérotation partagés (aucun doublon de numéro entre postes)
 create table if not exists public.counters (
@@ -10498,6 +10833,26 @@ create table if not exists public.counters (
   last    integer not null default 0,
   primary key (dossier, kind, year)
 );
+
+-- 3 bis. Actions uniques sur une pièce (validation, annulation, retour de dépôt) : un seul poste les exécute
+create table if not exists public.doc_actions (
+  dossier    text        not null,
+  doc_id     text        not null,
+  action     text        not null,
+  device     text        not null,
+  number     integer,
+  created_at timestamptz not null default now(),
+  primary key (dossier, doc_id, action)
+);
+
+-- 3 ter. Envois acceptés : un poste dont la réponse s'est perdue (coupure) sait ensuite si son envoi a été écrit
+create table if not exists public.record_revs (
+  dossier    text        not null,
+  rev        text        not null,
+  created_at timestamptz not null default now(),
+  primary key (dossier, rev)
+);
+create index if not exists record_revs_age_idx on public.record_revs (dossier, created_at);
 
 -- Date et auteur posés par le serveur (l'horloge des postes n'est jamais utilisée)
 create or replace function public.touch_record() returns trigger
@@ -10526,6 +10881,8 @@ $$;
 alter table public.members  enable row level security;
 alter table public.records  enable row level security;
 alter table public.counters enable row level security;
+alter table public.doc_actions enable row level security;
+alter table public.record_revs enable row level security;
 
 drop policy if exists members_read_own on public.members;
 create policy members_read_own on public.members
@@ -10536,21 +10893,15 @@ drop policy if exists records_read on public.records;
 create policy records_read on public.records
   for select to authenticated using (public.is_member(dossier));
 
+-- Écritures uniquement par la fonction push_records (envoi conditionnel) ; jamais de suppression : on marque « deleted »
 drop policy if exists records_insert on public.records;
-create policy records_insert on public.records
-  for insert to authenticated with check (public.is_member(dossier));
-
 drop policy if exists records_update on public.records;
-create policy records_update on public.records
-  for update to authenticated
-  using (public.is_member(dossier)) with check (public.is_member(dossier));
--- Pas de règle de suppression : on ne supprime jamais, on marque « deleted »
 
 -- Droits au plus juste : Supabase donne par défaut tous les droits (y compris DELETE et TRUNCATE,
 -- que les règles RLS ne couvrent pas). On les retire puis on n'accorde que le nécessaire.
-revoke all on public.members, public.records, public.counters from anon, authenticated;
+revoke all on public.members, public.records, public.counters, public.doc_actions, public.record_revs from anon, authenticated;
 grant select on public.members to authenticated;
-grant select, insert, update on public.records to authenticated;
+grant select on public.records to authenticated;
 
 -- Prochain numéro de pièce : verrou sur le compteur, donc deux postes ne reçoivent jamais le même
 create or replace function public.next_number(p_dossier text, p_kind text, p_year integer, p_min integer)
@@ -10574,6 +10925,124 @@ grant execute on function public.next_number(text, text, integer, integer) to au
 revoke all on function public.is_member(text) from public, anon;
 grant execute on function public.is_member(text) to authenticated;
 
+-- Envoi conditionnel : une ligne n'est écrite que si le poste l'a lue dans sa dernière version.
+-- Sinon elle est refusée et renvoyée : le poste fusionne puis renvoie (aucune modification écrasée en silence).
+-- p_rows : [{collection, id, data, deleted, rev, expected}] ; expected = updated_at vu par le poste (null = nouvelle ligne)
+create or replace function public.push_records(p_dossier text, p_rows jsonb) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  r jsonb;
+  cur public.records;
+  accepted jsonb := '[]'::jsonb;
+  rejected jsonb := '[]'::jsonb;
+begin
+  if not public.is_member(p_dossier) then
+    raise exception 'Accès refusé au dossier %', p_dossier using errcode = '42501';
+  end if;
+  for r in select * from jsonb_array_elements(p_rows) loop
+    select * into cur from public.records
+      where dossier = p_dossier and collection = r->>'collection' and id = r->>'id'
+      for update;
+    if found then
+      if r->>'expected' is null or cur.updated_at <> (r->>'expected')::timestamptz then
+        rejected := rejected || to_jsonb(cur);
+        continue;
+      end if;
+      update public.records
+        set data = r->'data', deleted = coalesce((r->>'deleted')::boolean, false), rev = r->>'rev'
+        where dossier = p_dossier and collection = r->>'collection' and id = r->>'id'
+        returning * into cur;
+    else
+      insert into public.records (dossier, collection, id, data, deleted, rev)
+        values (p_dossier, r->>'collection', r->>'id', r->'data', coalesce((r->>'deleted')::boolean, false), r->>'rev')
+        on conflict (dossier, collection, id) do nothing
+        returning * into cur;
+      if not found then
+        -- créée au même instant par un autre poste : refusée, le poste fusionnera
+        select * into cur from public.records
+          where dossier = p_dossier and collection = r->>'collection' and id = r->>'id';
+        rejected := rejected || to_jsonb(cur);
+        continue;
+      end if;
+    end if;
+    if r->>'rev' is not null then
+      insert into public.record_revs (dossier, rev) values (p_dossier, r->>'rev') on conflict do nothing;
+    end if;
+    accepted := accepted || jsonb_build_object('collection', cur.collection, 'id', cur.id, 'updated_at', cur.updated_at);
+  end loop;
+  -- Ménage occasionnel : les envois de plus de 90 jours ne servent plus
+  if random() < 0.01 then
+    delete from public.record_revs where dossier = p_dossier and created_at < now() - interval '90 days';
+  end if;
+  return jsonb_build_object('accepted', accepted, 'rejected', rejected);
+end $$;
+
+-- Lecture par clé (date, collection, id) : une ligne modifiée pendant la lecture passe en fin de liste
+-- au lieu de décaler les pages (rien n'est sauté)
+create or replace function public.pull_records(
+  p_dossier text, p_since timestamptz, p_after_ts timestamptz, p_after_collection text, p_after_id text, p_limit integer
+) returns setof public.records
+language sql stable security invoker set search_path = public as $$
+  select * from public.records
+  where dossier = p_dossier
+    and (p_since is null or updated_at >= p_since)
+    and (p_after_ts is null or (updated_at, collection, id) > (p_after_ts, p_after_collection, p_after_id))
+  order by updated_at, collection, id
+  limit least(greatest(p_limit, 1), 1000);
+$$;
+
+-- Parmi ces envois, lesquels ont été écrits ?
+create or replace function public.applied_revs(p_dossier text, p_revs text[]) returns text[]
+language plpgsql stable security definer set search_path = public as $$
+begin
+  if not public.is_member(p_dossier) then
+    raise exception 'Accès refusé au dossier %', p_dossier using errcode = '42501';
+  end if;
+  return coalesce((select array_agg(rev) from public.record_revs where dossier = p_dossier and rev = any(p_revs)), '{}');
+end $$;
+
+-- Action unique sur une pièce : le premier poste qui la demande l'obtient (avec le numéro pour une validation) ;
+-- les autres reçoivent already = true et n'appliquent rien (la synchro leur apportera le résultat).
+-- Le même poste qui redemande (réponse perdue) récupère la même action et le même numéro.
+create or replace function public.claim_doc_action(
+  p_dossier text, p_doc_id text, p_action text, p_device text, p_kind text, p_year integer, p_min integer
+) returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  a public.doc_actions;
+  v integer;
+begin
+  if not public.is_member(p_dossier) then
+    raise exception 'Accès refusé au dossier %', p_dossier using errcode = '42501';
+  end if;
+  insert into public.doc_actions (dossier, doc_id, action, device)
+    values (p_dossier, p_doc_id, p_action, p_device)
+    on conflict do nothing
+    returning * into a;
+  if not found then
+    select * into a from public.doc_actions where dossier = p_dossier and doc_id = p_doc_id and action = p_action;
+    return jsonb_build_object('number', a.number, 'already', a.device <> p_device);
+  end if;
+  if p_action = 'validate' then
+    insert into public.counters as c (dossier, kind, year, last)
+      values (p_dossier, p_kind, p_year, greatest(p_min, 0) + 1)
+      on conflict (dossier, kind, year)
+      do update set last = greatest(c.last, excluded.last - 1) + 1
+      returning c.last into v;
+    update public.doc_actions set number = v where dossier = p_dossier and doc_id = p_doc_id and action = p_action;
+  end if;
+  return jsonb_build_object('number', v, 'already', false);
+end $$;
+
+revoke all on function public.push_records(text, jsonb) from public, anon;
+grant execute on function public.push_records(text, jsonb) to authenticated;
+revoke all on function public.pull_records(text, timestamptz, timestamptz, text, text, integer) from public, anon;
+grant execute on function public.pull_records(text, timestamptz, timestamptz, text, text, integer) to authenticated;
+revoke all on function public.applied_revs(text, text[]) from public, anon;
+grant execute on function public.applied_revs(text, text[]) to authenticated;
+revoke all on function public.claim_doc_action(text, text, text, text, text, integer, integer) from public, anon;
+grant execute on function public.claim_doc_action(text, text, text, text, text, integer, integer) to authenticated;
+
 -- 4. Ajoutez ici les comptes autorisés (un par ligne), puis exécutez :
 -- insert into public.members (dossier, email) values
 --   ('orthomed', 'admin@votre-societe.ma'),
@@ -10587,7 +11056,9 @@ cat > docs/MULTIPOSTE.md <<'FIN_DU_FICHIER'
 
 Les données sont rangées dans une **base en ligne Supabase** partagée par tous vos ordinateurs.
 Chaque pièce, client, article ou lot est synchronisé séparément toutes les 4 secondes environ.
-Les numéros de pièces sont attribués par le serveur : deux postes ne peuvent jamais donner le même numéro.
+Le serveur arbitre : une modification faite sur une version périmée est refusée, fusionnée avec celle de l'autre
+poste puis renvoyée ; rien n'est écrasé en silence. Les numéros de pièces sont attribués par le serveur : deux postes
+ne peuvent jamais donner le même numéro, ni valider deux fois la même pièce.
 
 Durée : environ 15 minutes, une seule fois.
 
@@ -10607,6 +11078,8 @@ Durée : environ 15 minutes, une seule fois.
 1. Dans le projet : menu de gauche › **SQL Editor** › **New query**.
 2. Ouvrez le fichier `supabase/schema.sql` de ProfitPilot, copiez **tout** son contenu, collez-le, puis cliquez **Run**.
    Le message *Success* doit s'afficher. (Le script peut être relancé sans danger.)
+3. **Après chaque mise à jour de ProfitPilot**, recollez et relancez ce script de la même façon : il ajoute ce qui
+   manque sans toucher à vos données.
 
 ## Étape 3 — Créer les comptes de connexion des ordinateurs
 
@@ -10678,11 +11151,18 @@ L'adresse est publique, mais les données restent protégées : il faut un compt
 ## Bon à savoir
 
 - **Connexion Internet** : sans Internet, on continue à travailler ; les modifications partent au retour de la
-  connexion (« Hors ligne · N modification(s) en attente » en bas de l'écran). Seule la **validation** d'une pièce
-  demande d'être en ligne, car son numéro définitif vient du serveur.
-- **Deux personnes sur la même pièce** : la dernière modification enregistrée l'emporte, avec deux exceptions :
-  une pièce validée ne revient jamais en brouillon et ne peut pas être supprimée par un autre poste, et les
-  règlements saisis sur deux postes s'additionnent.
+  connexion (« Hors ligne · N modification(s) en attente » en bas de l'écran). Seules la **validation** et
+  l'**annulation** d'une pièce, et la **reprise d'un dépôt**, demandent d'être en ligne : le serveur les accorde à un
+  seul poste (numéro définitif, mouvements de stock jamais faits deux fois).
+- **Deux personnes sur la même fiche** : si elles modifient des champs différents, les deux modifications sont
+  gardées ; sur le même champ, la dernière enregistrée l'emporte. Les sorties et entrées de stock faites en même temps
+  sur deux postes s'additionnent (10 en stock, une sortie de 1 sur chaque poste : 8). Une pièce validée ne revient
+  jamais en brouillon et ne peut pas être supprimée par un autre poste ; les règlements saisis sur deux postes
+  s'additionnent.
+- **Inventaire** : faites le comptage d'un même article sur un seul poste à la fois (deux comptages saisis en même
+  temps seraient additionnés comme deux mouvements).
+- **Restaurer une sauvegarde** est désactivé en multi-postes (cela mélangerait d'anciennes données avec celles des
+  autres postes).
 - **Plusieurs onglets** sur un même ordinateur : c'est possible ; un seul onglet synchronise (« Synchronisé par un
   autre onglet » dans les autres) et un autre prend le relais si on le ferme.
 - **Utilisateurs et droits** : les profils ProfitPilot (code PIN, droits par module) sont partagés entre les postes.

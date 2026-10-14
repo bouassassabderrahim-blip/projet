@@ -73,3 +73,23 @@ export function decodeInvite(code: string): Pick<SyncConfig, 'url' | 'anonKey' |
 
 /** Identifiant de dossier : minuscules, chiffres et tirets */
 export const isValidDossier = (d: string) => /^[a-z0-9][a-z0-9-]{1,40}$/.test(d)
+
+const DEVICE_KEY = 'profitpilot-sync:device'
+
+/** Identifiant de ce navigateur (fixe), pour reconnaître ses propres actions après une coupure */
+export function deviceId(): string {
+	try {
+		const existing = localStorage.getItem(DEVICE_KEY)
+		if (existing) return existing
+		const id = randomId()
+		localStorage.setItem(DEVICE_KEY, id)
+		return id
+	} catch {
+		return 'memoire-' + randomId()
+	}
+}
+
+export function randomId(): string {
+	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+	return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)
+}

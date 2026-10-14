@@ -2,7 +2,9 @@
 
 Les données sont rangées dans une **base en ligne Supabase** partagée par tous vos ordinateurs.
 Chaque pièce, client, article ou lot est synchronisé séparément toutes les 4 secondes environ.
-Les numéros de pièces sont attribués par le serveur : deux postes ne peuvent jamais donner le même numéro.
+Le serveur arbitre : une modification faite sur une version périmée est refusée, fusionnée avec celle de l'autre
+poste puis renvoyée ; rien n'est écrasé en silence. Les numéros de pièces sont attribués par le serveur : deux postes
+ne peuvent jamais donner le même numéro, ni valider deux fois la même pièce.
 
 Durée : environ 15 minutes, une seule fois.
 
@@ -22,6 +24,8 @@ Durée : environ 15 minutes, une seule fois.
 1. Dans le projet : menu de gauche › **SQL Editor** › **New query**.
 2. Ouvrez le fichier `supabase/schema.sql` de ProfitPilot, copiez **tout** son contenu, collez-le, puis cliquez **Run**.
    Le message *Success* doit s'afficher. (Le script peut être relancé sans danger.)
+3. **Après chaque mise à jour de ProfitPilot**, recollez et relancez ce script de la même façon : il ajoute ce qui
+   manque sans toucher à vos données.
 
 ## Étape 3 — Créer les comptes de connexion des ordinateurs
 
@@ -93,11 +97,18 @@ L'adresse est publique, mais les données restent protégées : il faut un compt
 ## Bon à savoir
 
 - **Connexion Internet** : sans Internet, on continue à travailler ; les modifications partent au retour de la
-  connexion (« Hors ligne · N modification(s) en attente » en bas de l'écran). Seule la **validation** d'une pièce
-  demande d'être en ligne, car son numéro définitif vient du serveur.
-- **Deux personnes sur la même pièce** : la dernière modification enregistrée l'emporte, avec deux exceptions :
-  une pièce validée ne revient jamais en brouillon et ne peut pas être supprimée par un autre poste, et les
-  règlements saisis sur deux postes s'additionnent.
+  connexion (« Hors ligne · N modification(s) en attente » en bas de l'écran). Seules la **validation** et
+  l'**annulation** d'une pièce, et la **reprise d'un dépôt**, demandent d'être en ligne : le serveur les accorde à un
+  seul poste (numéro définitif, mouvements de stock jamais faits deux fois).
+- **Deux personnes sur la même fiche** : si elles modifient des champs différents, les deux modifications sont
+  gardées ; sur le même champ, la dernière enregistrée l'emporte. Les sorties et entrées de stock faites en même temps
+  sur deux postes s'additionnent (10 en stock, une sortie de 1 sur chaque poste : 8). Une pièce validée ne revient
+  jamais en brouillon et ne peut pas être supprimée par un autre poste ; les règlements saisis sur deux postes
+  s'additionnent.
+- **Inventaire** : faites le comptage d'un même article sur un seul poste à la fois (deux comptages saisis en même
+  temps seraient additionnés comme deux mouvements).
+- **Restaurer une sauvegarde** est désactivé en multi-postes (cela mélangerait d'anciennes données avec celles des
+  autres postes).
 - **Plusieurs onglets** sur un même ordinateur : c'est possible ; un seul onglet synchronise (« Synchronisé par un
   autre onglet » dans les autres) et un autre prend le relais si on le ferme.
 - **Utilisateurs et droits** : les profils ProfitPilot (code PIN, droits par module) sont partagés entre les postes.

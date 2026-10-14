@@ -7,6 +7,29 @@ export interface RemoteRow {
 	deleted: boolean
 	updated_at?: string
 	updated_by?: string | null
+	/** Identifiant de l'envoi qui a écrit cette version */
+	rev?: string | null
+}
+
+/** Ligne à envoyer : expected = date serveur de la version sur laquelle le poste s'appuie (null = nouvelle ligne) */
+export interface PushRow extends RemoteRow {
+	rev: string
+	expected: string | null
+}
+
+export interface PushResult {
+	/** Lignes écrites, avec leur nouvelle date serveur */
+	accepted: { collection: string; id: string; updated_at: string }[]
+	/** Lignes refusées (modifiées entre-temps sur un autre poste) : version serveur actuelle, à fusionner */
+	rejected: RemoteRow[]
+}
+
+/** Résultat d'une action unique sur une pièce (validation, annulation, retour de dépôt) */
+export interface Claim {
+	/** Numéro définitif attribué par le serveur (validation) */
+	number: number | null
+	/** Action déjà faite par un autre poste : ne rien appliquer ici */
+	already: boolean
 }
 
 export interface Session {
@@ -23,6 +46,17 @@ export class OfflineError extends Error {}
 export class AuthError extends Error {}
 /** Erreur renvoyée par le serveur */
 export class RemoteError extends Error {}
+
+/** Envoi interrompu : les paquets déjà écrits (partial) sont à confirmer, puis l'erreur d'origine relancée */
+export class PushError extends Error {
+	readonly partial: PushResult
+	readonly original: Error
+	constructor(original: Error, partial: PushResult) {
+		super(original.message)
+		this.partial = partial
+		this.original = original
+	}
+}
 
 const PAGE = 1000
 const PUSH_CHUNK = 200
@@ -153,46 +187,71 @@ export class SupabaseRemote {
 		return `dossier=eq.${encodeURIComponent(this.dossier)}`
 	}
 
-	/** Lignes modifiées depuis une date (toutes si null), par pages de 1 000 */
+	private async rpc<T>(name: string, args: Record<string, unknown>): Promise<T> {
+		const res = await this.rest(`rpc/${name}`, { method: 'POST', body: JSON.stringify({ p_dossier: this.dossier, ...args }) })
+		return (await res.json()) as T
+	}
+
+	/**
+	 * Lignes modifiées depuis une date (toutes si null), par pages de 1 000 lues à la suite de la dernière ligne reçue
+	 * (date, collection, id) : une ligne modifiée pendant la lecture repasse en fin de liste, aucune n'est sautée.
+	 */
 	async pull(since: string | null): Promise<RemoteRow[]> {
 		const rows: RemoteRow[] = []
-		for (let offset = 0; ; offset += PAGE) {
-			const params = [
-				'select=collection,id,data,deleted,updated_at,updated_by',
-				this.filter(),
-				since ? `updated_at=gte.${encodeURIComponent(since)}` : '',
-				'order=updated_at.asc,collection.asc,id.asc',
-				`limit=${PAGE}`,
-				`offset=${offset}`,
-			].filter(Boolean)
-			const res = await this.rest(`records?${params.join('&')}`)
-			const page = (await res.json()) as RemoteRow[]
+		let after: RemoteRow | null = null
+		for (;;) {
+			const page: RemoteRow[] = await this.rpc<RemoteRow[]>('pull_records', {
+				p_since: since,
+				p_after_ts: after?.updated_at ?? null,
+				p_after_collection: after?.collection ?? null,
+				p_after_id: after?.id ?? null,
+				p_limit: PAGE,
+			})
 			rows.push(...page)
 			if (page.length < PAGE) return rows
+			after = page[page.length - 1]
 		}
 	}
 
-	/** Envoi (insertion ou mise à jour) par paquets d'au plus 200 lignes et ~400 Ko (images du papier à en-tête) */
-	async push(rows: RemoteRow[]): Promise<void> {
+	/**
+	 * Envoi conditionnel par paquets d'au plus 200 lignes et ~400 Ko (images du papier à en-tête) :
+	 * une ligne modifiée entre-temps sur un autre poste est refusée et renvoyée, jamais écrasée.
+	 */
+	async push(rows: PushRow[]): Promise<PushResult> {
+		const result: PushResult = { accepted: [], rejected: [] }
 		let chunk: string[] = []
 		let size = 0
 		const flush = async () => {
 			if (!chunk.length) return
-			await this.rest('records', {
+			const res = await this.rest('rpc/push_records', {
 				method: 'POST',
-				headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-				body: '[' + chunk.join(',') + ']',
+				body: `{"p_dossier":${JSON.stringify(this.dossier)},"p_rows":[${chunk.join(',')}]}`,
 			})
+			const part = (await res.json()) as Partial<PushResult>
+			result.accepted.push(...(part.accepted ?? []))
+			result.rejected.push(...(part.rejected ?? []))
 			chunk = []
 			size = 0
 		}
-		for (const r of rows) {
-			const json = JSON.stringify({ dossier: this.dossier, collection: r.collection, id: r.id, data: r.data, deleted: r.deleted })
-			if (chunk.length && (chunk.length >= PUSH_CHUNK || size + json.length > PUSH_BYTES)) await flush()
-			chunk.push(json)
-			size += json.length
+		try {
+			for (const r of rows) {
+				const json = JSON.stringify({ collection: r.collection, id: r.id, data: r.data, deleted: r.deleted, rev: r.rev, expected: r.expected })
+				if (chunk.length && (chunk.length >= PUSH_CHUNK || size + json.length > PUSH_BYTES)) await flush()
+				chunk.push(json)
+				size += json.length
+			}
+			await flush()
+		} catch (e) {
+			if (result.accepted.length === 0 || !(e instanceof Error)) throw e
+			throw new PushError(e, result)
 		}
-		await flush()
+		return result
+	}
+
+	/** Parmi ces envois (dont la réponse s'est perdue), ceux qui ont bien été écrits */
+	async appliedRevs(revs: string[]): Promise<Set<string>> {
+		if (revs.length === 0) return new Set()
+		return new Set(await this.rpc<string[]>('applied_revs', { p_revs: revs }))
 	}
 
 	/** Le compte connecté figure-t-il dans la liste des membres du dossier ? */
@@ -211,15 +270,21 @@ export class SupabaseRemote {
 		return Number.isFinite(total) ? total : (await res.json()).length
 	}
 
-	/** Prochain numéro de pièce, attribué par le serveur (aucun doublon entre postes) */
-	async nextNumber(kind: string, year: number, min: number): Promise<number> {
-		const res = await this.rest('rpc/next_number', {
-			method: 'POST',
-			body: JSON.stringify({ p_dossier: this.dossier, p_kind: kind, p_year: year, p_min: min }),
+	/**
+	 * Action unique sur une pièce : un seul poste l'obtient (avec le numéro définitif pour une validation).
+	 * Le même poste qui redemande après une coupure retrouve la même action et le même numéro.
+	 */
+	async claim(docId: string, action: string, device: string, kind: string, year: number, min: number): Promise<Claim> {
+		const value = await this.rpc<{ number?: unknown; already?: unknown }>('claim_doc_action', {
+			p_doc_id: docId,
+			p_action: action,
+			p_device: device,
+			p_kind: kind,
+			p_year: year,
+			p_min: min,
 		})
-		const value = (await res.json()) as unknown
-		const n = Number(value)
-		if (!Number.isInteger(n) || n < 1) throw new RemoteError('Numéro invalide reçu du serveur')
-		return n
+		const n = value.number === null || value.number === undefined ? null : Number(value.number)
+		if (n !== null && (!Number.isInteger(n) || n < 1)) throw new RemoteError('Numéro invalide reçu du serveur')
+		return { number: n, already: value.already === true }
 	}
 }

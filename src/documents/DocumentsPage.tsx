@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { allocateNumber, isSyncActive } from '../sync/runtime'
+import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react'
+import { isSyncActive, runDocAction } from '../sync/runtime'
 import type { Product } from '../types'
 import { useAccess } from '../access/context'
 import DocumentEditor from './DocumentEditor'
@@ -7,6 +7,7 @@ import DocumentPrint from './DocumentPrint'
 import PaymentDialog from './PaymentDialog'
 import ReminderPrint from './ReminderPrint'
 import { downloadCsv, journal } from './csv'
+import { readDocuments } from './storage'
 import { balanceOf, isActive, isOverdue, paidAmount, sign } from './ledger'
 import { addDays, finalNumber, frDate, newDocument, newId, nextNumber, today } from './numbering'
 import { computeTotals, formatMAD, round2 } from './tva'
@@ -29,7 +30,8 @@ import './documents.css'
 interface Props {
 	kind: DocKind
 	documents: CommercialDocument[]
-	onChange: (docs: CommercialDocument[]) => void
+	/** Accepte une mise à jour fonctionnelle (appliquée à la liste la plus récente, même après une attente réseau) */
+	onChange: Dispatch<SetStateAction<CommercialDocument[]>>
 	products: Product[]
 	lots: StockLot[]
 	kits: Kit[]
@@ -175,72 +177,67 @@ export default function DocumentsPage({
 		setView({ mode: 'list' })
 	}
 
-	// Pièces les plus récentes (la synchronisation peut en apporter pendant une attente réseau)
+	// Pièces les plus récentes (la synchronisation peut en apporter pendant une attente réseau ;
+	// si la page a été quittée entre-temps, on relit le stockage)
 	const docsRef = useRef(documents)
+	const mounted = useRef(true)
 	useEffect(() => {
 		docsRef.current = documents
 	}, [documents])
+	useEffect(() => {
+		mounted.current = true
+		return () => {
+			mounted.current = false
+		}
+	}, [])
 	const [validating, setValidating] = useState<string | null>(null)
 
 	async function setStatus(doc: CommercialDocument, status: DocStatus) {
-		if (status === 'validated' && doc.status === 'draft' && isSyncActive()) {
-			// Multi-postes : le numéro définitif vient du serveur, pour qu'aucun autre poste ne puisse l'attribuer
-			const local = finalNumber(doc, documents)
-			const prefix = local.slice(0, local.lastIndexOf('-') + 1)
-			setValidating(doc.id)
-			let seq: number | null
-			try {
-				seq = await allocateNumber(doc.kind, Number(doc.date.slice(0, 4)), Number(local.slice(prefix.length)) - 1)
-			} catch {
-				alert(
-					'Validation impossible pour le moment : le numéro définitif est attribué par le serveur en mode multi-postes. Vérifiez la connexion Internet puis réessayez.',
-				)
-				return
-			} finally {
-				setValidating(null)
-			}
-			const latest = docsRef.current
-			const fresh = latest.find((d) => d.id === doc.id)
-			// Pièce supprimée ou déjà validée entre-temps (par exemple sur un autre poste)
-			if (!fresh || fresh.status !== 'draft') return
-			applyStatus(fresh, status, seq === null ? undefined : prefix + String(seq).padStart(4, '0'), latest)
-			return
+		const validate = status === 'validated' && doc.status === 'draft'
+		const cancel = status === 'cancelled' && doc.status !== 'draft'
+		if (!isSyncActive() || (!validate && !cancel)) return applyStatus(doc, status, undefined, documents)
+		// Multi-postes : le serveur n'accorde l'opération qu'à un seul poste (numéro définitif, mouvements de stock)
+		const local = finalNumber(doc, documents)
+		const prefix = local.slice(0, local.lastIndexOf('-') + 1)
+		setValidating(doc.id)
+		try {
+			const outcome = await runDocAction(
+				{
+					docId: doc.id,
+					action: validate ? 'validate' : 'cancel',
+					kind: doc.kind,
+					year: Number(doc.date.slice(0, 4)),
+					min: Number(local.slice(prefix.length)) - 1,
+				},
+				(seq) => {
+					const latest = mounted.current ? docsRef.current : (readDocuments() ?? docsRef.current)
+					const fresh = latest.find((d) => d.id === doc.id)
+					// Pièce supprimée ou déjà passée à un autre état entre-temps
+					if (!fresh || fresh.status !== doc.status) return
+					applyStatus(fresh, status, validate && seq !== null ? prefix + String(seq).padStart(4, '0') : undefined, latest)
+				},
+			)
+			if (outcome === 'already')
+				alert(`Cette pièce vient d'être ${validate ? 'validée' : 'annulée'} sur un autre poste : elle sera à jour ici dans quelques secondes.`)
+		} catch {
+			alert(
+				`${validate ? 'Validation' : 'Annulation'} impossible pour le moment : en mode multi-postes, le serveur doit confirmer l'opération (pour éviter un numéro ou un mouvement de stock en double). Vérifiez la connexion Internet puis réessayez.`,
+			)
+		} finally {
+			if (mounted.current) setValidating(null)
 		}
-		applyStatus(doc, status, undefined, documents)
 	}
 
 	function applyStatus(doc: CommercialDocument, status: DocStatus, forcedNumber: string | undefined, documents: CommercialDocument[]) {
 		// Validation : numéro définitif, à la suite des pièces déjà validées (aucun trou possible)
 		const number = forcedNumber ?? (status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number)
-		let next = documents.map((d) =>
-			d.id === doc.id ? { ...d, status, number, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
-		)
-		// Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
-		const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
-		// (pas en multi-postes : ce brouillon peut appartenir à un autre poste, on ne le touche pas)
-		if (clash && !isSyncActive()) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
-		if (number !== doc.number) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
+		if (number !== doc.number && mounted.current) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
 		access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${number} · ${doc.party.name}`)
 		const supplier = doc.party.name
+		let moved: Record<string, number> | null = null
 
 		if (status === 'validated') {
-			if (doc.kind === 'delivery') {
-				const moved = onStockMove?.(doc.lines, -1, '', number) ?? {}
-				// On retient la quantité réellement sortie (pour une annulation exacte) ;
-				// BL en dépôt : chaque ligne reste à facturer à la pose
-				next = next.map((d) =>
-					d.id === doc.id
-						? {
-								...d,
-								lines: d.lines.map((l) => ({
-									...l,
-									movedQty: moved[l.id] ?? l.quantity,
-									depot: doc.consignment ? (l.depot ?? 'depot') : l.depot,
-								})),
-							}
-						: d,
-				)
-			}
+			if (doc.kind === 'delivery') moved = onStockMove?.(doc.lines, -1, '', number) ?? {}
 			if (doc.kind === 'receipt') onStockMove?.(doc.lines, 1, supplier, number)
 			if (invoiceMovesStock(doc, documents)) onStockMove?.(doc.lines.filter((l) => !l.depotRef), -1, '', number)
 		}
@@ -255,7 +252,30 @@ export default function DocumentsPage({
 				)
 			if (doc.kind === 'receipt') onStockMove?.(doc.lines, -1, '', `Annulation ${doc.number}`)
 		}
-		onChange(next)
+
+		const by = stamp().by
+		const multi = isSyncActive()
+		// Mise à jour appliquée à la liste la plus récente (rien de ce qui a changé entre-temps n'est perdu)
+		onChange((prev) => {
+			let next = prev.map((d) => {
+				if (d.id !== doc.id) return d
+				const updated: CommercialDocument = { ...d, status, number, ...(status === 'validated' ? { validatedBy: by } : {}) }
+				// BL : on retient la quantité réellement sortie (pour une annulation exacte) ;
+				// BL en dépôt : chaque ligne reste à facturer à la pose
+				if (moved)
+					updated.lines = d.lines.map((l) => ({
+						...l,
+						movedQty: moved[l.id] ?? l.quantity,
+						depot: doc.consignment ? (l.depot ?? 'depot') : l.depot,
+					}))
+				return updated
+			})
+			// Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
+			// (pas en multi-postes : ce brouillon peut appartenir à un autre poste, on ne le touche pas)
+			const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
+			if (clash && !multi) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
+			return next
+		})
 	}
 
 	function addPayment(doc: CommercialDocument, payment: Payment) {

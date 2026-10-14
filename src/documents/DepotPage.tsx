@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import { runDocAction } from '../sync/runtime'
 import { useAccess } from '../access/context'
 import { addDays, daysBetween, emptyLine, frDate, newId, nextNumber, today } from './numbering'
 import { formatMAD, lineHT } from './tva'
@@ -7,7 +8,7 @@ import './documents.css'
 
 interface Props {
 	documents: CommercialDocument[]
-	onChange: (docs: CommercialDocument[]) => void
+	onChange: Dispatch<SetStateAction<CommercialDocument[]>>
 	onNavigate: (kind: DocKind, openId?: string) => void
 	onStockMove: (lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string) => Record<string, number> | void
 }
@@ -76,11 +77,19 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 		onNavigate('invoice', id)
 	}
 
-	function giveBack(item: DepotItem) {
+	async function giveBack(item: DepotItem) {
 		if (!confirm(`Reprendre « ${item.line.description} » en stock ?`)) return
-		onChange(setDepot(documents, [item], 'returned'))
-		access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
-		onStockMove([{ ...item.line, quantity: item.line.movedQty ?? item.line.quantity }], 1, '', `Retour dépôt ${item.bl.number}`)
+		try {
+			// Multi-postes : un seul poste peut reprendre cet article (pas de double entrée en stock)
+			const outcome = await runDocAction({ docId: item.bl.id, action: `return:${item.line.id}`, kind: 'delivery', year: 0, min: 0 }, () => {
+				onChange((prev) => setDepot(prev, [item], 'returned'))
+				access.log('Retour de dépôt', `${item.line.description} · ${item.bl.number}`)
+				onStockMove([{ ...item.line, quantity: item.line.movedQty ?? item.line.quantity }], 1, '', `Retour dépôt ${item.bl.number}`)
+			})
+			if (outcome === 'already') alert('Cet article vient d’être repris en stock sur un autre poste.')
+		} catch {
+			alert('Reprise impossible pour le moment : en mode multi-postes, le serveur doit la confirmer. Vérifiez la connexion Internet puis réessayez.')
+		}
 	}
 
 	const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]))
@@ -142,7 +151,7 @@ export default function DepotPage({ documents, onChange, onNavigate, onStockMove
 														<button type="button" className="btn-primary" onClick={() => invoice([item])}>
 															Posé → facturer
 														</button>
-														<button type="button" onClick={() => giveBack(item)}>
+														<button type="button" onClick={() => void giveBack(item)}>
 															Retour en stock
 														</button>
 													</>
