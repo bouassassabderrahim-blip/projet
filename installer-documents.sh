@@ -3,8 +3,9 @@
 # À lancer à la racine du projet (dossier contenant src/)
 set -e
 [ -f src/types.ts ] || { echo "Erreur : lancez ce script dans le dossier du projet (src/types.ts introuvable)"; exit 1; }
-mkdir -p src/documents src/components src/shell src/access
+mkdir -p src/documents src/components src/shell src/access src/sync supabase docs
 for f in src/App.tsx src/components/Sidebar.tsx src/components/Dashboard.tsx src/types.ts; do [ -f "$f" ] && cp "$f" "$f.bak"; done; true
+
 
 
 
@@ -1312,7 +1313,8 @@ FIN_DU_FICHIER
 echo "OK src/documents/DocumentPrint.tsx"
 
 cat > src/documents/DocumentsPage.tsx <<'FIN_DU_FICHIER'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { allocateNumber, isSyncActive } from '../sync/runtime'
 import type { Product } from '../types'
 import { useAccess } from '../access/context'
 import DocumentEditor from './DocumentEditor'
@@ -1488,15 +1490,50 @@ export default function DocumentsPage({
     setView({ mode: 'list' })
   }
 
-  function setStatus(doc: CommercialDocument, status: DocStatus) {
+  // Pièces les plus récentes (la synchronisation peut en apporter pendant une attente réseau)
+  const docsRef = useRef(documents)
+  useEffect(() => {
+    docsRef.current = documents
+  }, [documents])
+  const [validating, setValidating] = useState<string | null>(null)
+
+  async function setStatus(doc: CommercialDocument, status: DocStatus) {
+    if (status === 'validated' && doc.status === 'draft' && isSyncActive()) {
+      // Multi-postes : le numéro définitif vient du serveur, pour qu'aucun autre poste ne puisse l'attribuer
+      const local = finalNumber(doc, documents)
+      const prefix = local.slice(0, local.lastIndexOf('-') + 1)
+      setValidating(doc.id)
+      let seq: number | null
+      try {
+        seq = await allocateNumber(doc.kind, Number(doc.date.slice(0, 4)), Number(local.slice(prefix.length)) - 1)
+      } catch {
+        alert(
+          'Validation impossible pour le moment : le numéro définitif est attribué par le serveur en mode multi-postes. Vérifiez la connexion Internet puis réessayez.',
+        )
+        return
+      } finally {
+        setValidating(null)
+      }
+      const latest = docsRef.current
+      const fresh = latest.find((d) => d.id === doc.id)
+      // Pièce supprimée ou déjà validée entre-temps (par exemple sur un autre poste)
+      if (!fresh || fresh.status !== 'draft') return
+      applyStatus(fresh, status, seq === null ? undefined : prefix + String(seq).padStart(4, '0'), latest)
+      return
+    }
+    applyStatus(doc, status, undefined, documents)
+  }
+
+  function applyStatus(doc: CommercialDocument, status: DocStatus, forcedNumber: string | undefined, documents: CommercialDocument[]) {
     // Validation : numéro définitif, à la suite des pièces déjà validées (aucun trou possible)
-    const number = status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number
+    const number = forcedNumber ?? (status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number)
     let next = documents.map((d) =>
       d.id === doc.id ? { ...d, status, number, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
     )
     // Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
     const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
-    if (clash) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
+    // (pas en multi-postes : ce brouillon peut appartenir à un autre poste, on ne le touche pas)
+    if (clash && !isSyncActive()) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
     if (number !== doc.number) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
     access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${number} · ${doc.party.name}`)
     const supplier = doc.party.name
@@ -1797,8 +1834,13 @@ export default function DocumentsPage({
                             </button>
                           )}
                           {canValidate && (
-                            <button type="button" className="btn-primary" onClick={() => setStatus(d, 'validated')}>
-                              Valider
+                            <button
+                              type="button"
+                              className="btn-primary"
+                              disabled={validating !== null}
+                              onClick={() => void setStatus(d, 'validated')}
+                            >
+                              {validating === d.id ? 'Validation…' : 'Valider'}
                             </button>
                           )}
                           {canDelete && (
@@ -1822,7 +1864,7 @@ export default function DocumentsPage({
                       {canDelete && d.status === 'validated' && d.kind !== 'invoice' && (
                         <button
                           type="button"
-                          onClick={() => confirm(`Annuler ${d.number} ?`) && setStatus(d, 'cancelled')}
+                          onClick={() => confirm(`Annuler ${d.number} ?`) && void setStatus(d, 'cancelled')}
                         >
                           Annuler
                         </button>
@@ -6137,15 +6179,27 @@ FIN_DU_FICHIER
 echo "OK src/shell/ModuleBar.tsx"
 
 cat > src/shell/StatusBar.tsx <<'FIN_DU_FICHIER'
+import type { SyncStatus } from '../sync/engine'
+
 interface Props {
   companyName: string
+  sync?: SyncStatus | null
+  onOpenSync?: () => void
   documentsCount: number
   productsCount: number
   lastBackup: string
 }
 
 /** Barre d'état : dossier, exercice, volumes, dernière sauvegarde */
-export default function StatusBar({ companyName, documentsCount, productsCount, lastBackup }: Props) {
+function syncLabel(s: SyncStatus): { text: string; tone: string } {
+  if (s.phase === 'offline') return { text: `Hors ligne${s.pending ? ` · ${s.pending} modification(s) en attente` : ''}`, tone: 'erp-status-warn' }
+  if (s.phase === 'auth') return { text: 'Multi-postes : reconnexion nécessaire', tone: 'erp-status-error' }
+  if (s.phase === 'error') return { text: 'Multi-postes : erreur de synchronisation', tone: 'erp-status-error' }
+  if (s.phase === 'ok' && s.lastSync) return { text: `Synchronisé à ${new Date(s.lastSync).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`, tone: 'erp-status-ok' }
+  return { text: 'Synchronisation…', tone: '' }
+}
+
+export default function StatusBar({ companyName, documentsCount, productsCount, lastBackup, sync, onOpenSync }: Props) {
   const year = new Date().getFullYear()
   return (
     <footer className="erp-status no-print">
@@ -6156,7 +6210,14 @@ export default function StatusBar({ companyName, documentsCount, productsCount, 
       <span className={lastBackup ? undefined : 'erp-status-warn'}>
         Sauvegarde : {lastBackup ? new Date(lastBackup + 'T00:00:00').toLocaleDateString('fr-FR') : 'jamais'}
       </span>
-      <span className="erp-status-right">Données enregistrées sur ce poste · {new Date().toLocaleDateString('fr-FR')}</span>
+      {sync ? (
+        <button type="button" className={`erp-status-sync ${syncLabel(sync).tone}`} onClick={onOpenSync} title={sync.message || 'État de la synchronisation'}>
+          ● {syncLabel(sync).text}
+        </button>
+      ) : null}
+      <span className="erp-status-right">
+        {sync ? 'Données partagées entre les postes' : 'Données enregistrées sur ce poste'} · {new Date().toLocaleDateString('fr-FR')}
+      </span>
     </footer>
   )
 }
@@ -6470,7 +6531,7 @@ export const MODULES: ModuleDef[] = [
     label: 'Paramètres',
     groups: [
       { title: 'Dossier', pages: ['company', 'backup'] },
-      { title: 'Administration', pages: ['users', 'audit'] },
+      { title: 'Administration', pages: ['users', 'audit', 'sync'] },
     ],
   },
 ]
@@ -6511,10 +6572,11 @@ export const PAGE_LABELS: Record<PageId, string> = {
   backup: 'Sauvegarde',
   users: 'Utilisateurs & droits',
   audit: "Journal d'activité",
+  sync: 'Multi-postes',
 }
 
 /** Pages réservées à l'administrateur */
-export const ADMIN_PAGES: PageId[] = ['users', 'audit']
+export const ADMIN_PAGES: PageId[] = ['users', 'audit', 'sync']
 
 export function moduleOf(page: PageId): ModuleDef {
   return MODULES.find((m) => m.groups.some((g) => g.pages.includes(page))) ?? MODULES[0]
@@ -6842,6 +6904,9 @@ body:has(.layout.erp) { margin: 0; }
 }
 .erp-secure { background: #b45309 !important; }
 .erp-secure:hover { background: #d97706 !important; }
+.erp-status-sync { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.erp-status-ok { color: #86efac; }
+.erp-status-error { color: #fca5a5; }
 FIN_DU_FICHIER
 echo "OK src/shell/shell.css"
 
@@ -7763,6 +7828,1316 @@ export const rolePermissions = (role: RoleId): Permissions =>
 FIN_DU_FICHIER
 echo "OK src/access/types.ts"
 
+cat > src/sync/SyncPage.tsx <<'FIN_DU_FICHIER'
+import { useState } from 'react'
+import { useAccess } from '../access/context'
+import { downloadFile } from '../documents/csv'
+import { createBackup } from '../documents/storage'
+import { today } from '../documents/numbering'
+import { decodeInvite, encodeInvite, isValidDossier, loadConfig, normalizeUrl, saveConfig, type SyncConfig } from './config'
+import { AuthError, OfflineError, SupabaseRemote } from './remote'
+import { createEngine, currentEngine, stopEngine, useSyncStatus } from './runtime'
+import { clearState } from './state'
+import '../documents/documents.css'
+import './sync.css'
+
+type Step =
+  | { kind: 'form' }
+  | { kind: 'choose'; config: SyncConfig; remoteCount: number; localCount: number }
+  | { kind: 'working'; text: string }
+
+function localDataCount(): number {
+  const count = (key: string) => {
+    try {
+      const v = JSON.parse(localStorage.getItem(key) ?? '[]') as unknown
+      return Array.isArray(v) ? v.length : 0
+    } catch {
+      return 0
+    }
+  }
+  return count('profitpilot:documents:v1') + count('profitpilot:parties:v1') + count('profitpilot:lots:v1')
+}
+
+function explain(e: unknown): string {
+  if (e instanceof OfflineError) return 'Serveur injoignable : vérifiez l’adresse du projet et la connexion Internet.'
+  if (e instanceof AuthError) return `Connexion refusée : ${e.message}. Vérifiez l’e-mail, le mot de passe et la clé publique.`
+  const msg = e instanceof Error ? e.message : String(e)
+  if (/relation .* does not exist|Could not find the table|schema cache/i.test(msg))
+    return 'La base en ligne n’est pas encore préparée : exécutez le script supabase/schema.sql (voir le guide).'
+  return msg
+}
+
+/** Mise en place et suivi du mode multi-postes (réservé à l'administrateur) */
+export default function SyncPage() {
+  const access = useAccess()
+  const status = useSyncStatus()
+  const [config, setConfig] = useState(loadConfig)
+  const [step, setStep] = useState<Step>({ kind: 'form' })
+  const [form, setForm] = useState({
+    invite: '',
+    url: config?.url ?? '',
+    anonKey: config?.anonKey ?? '',
+    dossier: config?.dossier ?? '',
+    email: config?.email ?? '',
+    password: '',
+  })
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+  const joined = config?.joined === true
+
+  function applyInvite(code: string) {
+    const decoded = decodeInvite(code)
+    setForm((f) => ({ ...f, invite: code, ...(decoded ?? {}) }))
+    setError(code.trim() && !decoded ? 'Code de connexion illisible.' : '')
+  }
+
+  async function connect() {
+    setError('')
+    const url = normalizeUrl(form.url)
+    const dossier = form.dossier.trim().toLowerCase()
+    if (!/^https?:\/\/.+/.test(url)) return setError('Adresse du projet invalide (ex. https://abcd.supabase.co).')
+    if (!form.anonKey.trim()) return setError('Indiquez la clé publique du projet.')
+    if (!isValidDossier(dossier)) return setError('Nom de dossier : lettres minuscules, chiffres et tirets (ex. orthomed).')
+    if (!form.email.trim() || !form.password) return setError('Indiquez l’e-mail et le mot de passe de ce poste.')
+    setStep({ kind: 'working', text: 'Connexion…' })
+    try {
+      const remote = new SupabaseRemote(url, form.anonKey.trim(), dossier)
+      const session = await remote.signIn(form.email.trim(), form.password)
+      if (!(await remote.isMember()))
+        throw new Error(
+          `Le compte ${session.email} n’est pas membre du dossier « ${dossier} ». Ajoutez-le dans la table « members » (voir le guide).`,
+        )
+      const next: SyncConfig = { url, anonKey: form.anonKey.trim(), dossier, email: session.email, refreshToken: session.refreshToken, joined: false }
+      saveConfig(next)
+      setConfig(next)
+      setStep({ kind: 'choose', config: next, remoteCount: await remote.count(), localCount: localDataCount() })
+    } catch (e) {
+      setStep({ kind: 'form' })
+      setError(explain(e))
+    }
+  }
+
+  async function upload(c: SyncConfig) {
+    setStep({ kind: 'working', text: 'Envoi des données de ce poste…' })
+    try {
+      const engine = createEngine(loadConfig() ?? c)
+      const n = await engine.uploadAll()
+      const done = { ...(loadConfig() ?? c), joined: true }
+      saveConfig(done)
+      setConfig(done)
+      engine.start()
+      access.log('Multi-postes activé', `Dossier ${c.dossier} créé en ligne (${n} enregistrements envoyés)`)
+      setStep({ kind: 'form' })
+    } catch (e) {
+      stopEngine()
+      setStep({ kind: 'form' })
+      setError(explain(e))
+    }
+  }
+
+  async function download(c: SyncConfig) {
+    if (!confirm('Remplacer toutes les données de cet ordinateur par celles du dossier en ligne ?')) return
+    setStep({ kind: 'working', text: 'Récupération du dossier en ligne…' })
+    try {
+      const engine = createEngine(loadConfig() ?? c)
+      await engine.downloadAll()
+      saveConfig({ ...(loadConfig() ?? c), joined: true })
+      stopEngine()
+      // Rechargement : chaque écran repart des données du dossier
+      location.reload()
+    } catch (e) {
+      stopEngine()
+      setStep({ kind: 'form' })
+      setError(explain(e))
+    }
+  }
+
+  async function reconnect() {
+    if (!config) return
+    setError('')
+    try {
+      const remote = new SupabaseRemote(config.url, config.anonKey, config.dossier)
+      const session = await remote.signIn(config.email, form.password)
+      const next = { ...config, refreshToken: session.refreshToken, email: session.email }
+      saveConfig(next)
+      setConfig(next)
+      createEngine(next).start()
+      setForm((f) => ({ ...f, password: '' }))
+    } catch (e) {
+      setError(explain(e))
+    }
+  }
+
+  async function leave() {
+    if (!config) return
+    if (!confirm('Déconnecter cet ordinateur du dossier partagé ? Les données restent sur ce poste mais ne seront plus synchronisées.')) return
+    access.log('Multi-postes désactivé sur ce poste', config.dossier)
+    stopEngine()
+    await clearState(config.dossier)
+    saveConfig(null)
+    setConfig(null)
+    setStep({ kind: 'form' })
+  }
+
+  function backupNow() {
+    downloadFile(`profitpilot-sauvegarde-${today()}.json`, JSON.stringify(createBackup(), null, 1), 'application/json')
+  }
+
+  const invite = config ? encodeInvite(config) : ''
+
+  if (joined && config) {
+    const s = status
+    return (
+      <div>
+        <div className="doc-stats">
+          <div className={s?.phase === 'ok' ? undefined : s?.phase === 'offline' ? 'doc-stat-late' : 'doc-stat-danger'}>
+            <span>État</span>
+            <strong>
+              {s?.phase === 'ok'
+                ? 'Synchronisé'
+                : s?.phase === 'offline'
+                  ? 'Hors ligne'
+                  : s?.phase === 'auth'
+                    ? 'Reconnexion nécessaire'
+                    : s?.phase === 'error'
+                      ? 'Erreur'
+                      : 'En cours…'}
+            </strong>
+          </div>
+          <div>
+            <span>Dernière synchronisation</span>
+            <strong>{s?.lastSync ? new Date(s.lastSync).toLocaleTimeString('fr-FR') : '—'}</strong>
+          </div>
+          <div className={s?.pending ? 'doc-stat-late' : undefined}>
+            <span>Modifications en attente</span>
+            <strong>{s?.pending ?? 0}</strong>
+          </div>
+          <div>
+            <span>Dossier · poste</span>
+            <strong className="sync-small">
+              {config.dossier} · {config.email}
+            </strong>
+          </div>
+        </div>
+        {s?.message && <p className={s.phase === 'offline' ? 'doc-warning' : 'doc-error'}>{s.message}</p>}
+        {!!s?.conflicts && (
+          <p className="doc-info">
+            {s.conflicts} enregistrement(s) modifié(s) en même temps sur un autre poste : la version de cet ordinateur a été
+            conservée.
+          </p>
+        )}
+
+        <div className="doc-toolbar">
+          <button type="button" className="btn-primary" onClick={() => void currentEngine()?.syncNow()}>
+            Synchroniser maintenant
+          </button>
+          <button type="button" onClick={() => void leave()}>
+            Déconnecter ce poste
+          </button>
+        </div>
+
+        {s?.phase === 'auth' && (
+          <fieldset className="doc-panel">
+            <legend>Se reconnecter</legend>
+            <div className="doc-grid">
+              <label>
+                Mot de passe de {config.email}
+                <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+              </label>
+            </div>
+            <button type="button" className="btn-primary" onClick={() => void reconnect()}>
+              Se reconnecter
+            </button>
+          </fieldset>
+        )}
+
+        <fieldset className="doc-panel">
+          <legend>Ajouter un autre ordinateur</legend>
+          <ol className="sync-steps">
+            <li>Sur l'autre ordinateur, ouvrez l'application puis Paramètres › Multi-postes.</li>
+            <li>Collez ce code de connexion, puis saisissez l'e-mail et le mot de passe du compte de ce poste.</li>
+            <li>Choisissez « Récupérer le dossier sur ce poste ».</li>
+          </ol>
+          <div className="sync-invite">
+            <code>{invite}</code>
+            <button
+              type="button"
+              onClick={() => {
+                void navigator.clipboard?.writeText(invite)
+                setCopied(true)
+              }}
+            >
+              {copied ? 'Copié ✓' : 'Copier'}
+            </button>
+          </div>
+          <p className="doc-count">Le code ne contient ni e-mail ni mot de passe : chaque poste se connecte avec son propre compte.</p>
+        </fieldset>
+        {error && <p className="doc-error">{error}</p>}
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <p className="doc-info">
+        Le mode multi-postes range les données dans une base en ligne (Supabase) partagée par tous vos ordinateurs. Chaque
+        pièce, client ou lot est synchronisé séparément toutes les quelques secondes ; les numéros de pièces sont attribués
+        par le serveur pour qu'aucun poste ne puisse donner le même. Préparez d'abord la base en suivant le guide
+        docs/MULTIPOSTE.md (environ 15 minutes, une seule fois).
+      </p>
+
+      {step.kind === 'working' && <p className="doc-warning">{step.text}</p>}
+
+      {step.kind === 'form' && (
+        <fieldset className="doc-panel">
+          <legend>Connecter cet ordinateur</legend>
+          <label className="doc-notes">
+            Code de connexion (si un autre poste est déjà configuré)
+            <input value={form.invite} placeholder="PP1-…" onChange={(e) => applyInvite(e.target.value)} />
+          </label>
+          <div className="doc-grid">
+            <label>
+              Adresse du projet Supabase
+              <input value={form.url} placeholder="https://abcd.supabase.co" onChange={(e) => setForm({ ...form, url: e.target.value })} />
+            </label>
+            <label>
+              Clé publique (anon / publishable)
+              <input value={form.anonKey} onChange={(e) => setForm({ ...form, anonKey: e.target.value })} />
+            </label>
+            <label>
+              Nom du dossier
+              <input value={form.dossier} placeholder="orthomed" onChange={(e) => setForm({ ...form, dossier: e.target.value })} />
+            </label>
+            <label>
+              E-mail du compte de ce poste
+              <input type="email" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
+            </label>
+            <label>
+              Mot de passe
+              <input type="password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            </label>
+          </div>
+          <button type="button" className="btn-primary" onClick={() => void connect()}>
+            Se connecter
+          </button>
+        </fieldset>
+      )}
+
+      {step.kind === 'choose' && (
+        <fieldset className="doc-panel">
+          <legend>Dossier « {step.config.dossier} »</legend>
+          {step.remoteCount === 0 ? (
+            <>
+              <p>
+                Le dossier en ligne est <strong>vide</strong> : cet ordinateur est le premier. Ses données ({step.localCount}{' '}
+                pièces, tiers et lots, plus les articles et les paramètres) vont être envoyées.
+              </p>
+              <button type="button" className="btn-primary" onClick={() => void upload(step.config)}>
+                Envoyer les données de ce poste
+              </button>
+            </>
+          ) : (
+            <>
+              <p>
+                Le dossier en ligne contient déjà <strong>{step.remoteCount} enregistrements</strong>. Cet ordinateur va
+                récupérer ces données.
+              </p>
+              {step.localCount > 0 && (
+                <p className="doc-warning">
+                  Cet ordinateur contient aussi des données ({step.localCount} pièces, tiers et lots) : elles seront
+                  remplacées. Téléchargez d'abord une sauvegarde si vous voulez les garder.{' '}
+                  <button type="button" onClick={backupNow}>
+                    Télécharger une sauvegarde
+                  </button>
+                </p>
+              )}
+              <button type="button" className="btn-primary" onClick={() => void download(step.config)}>
+                Récupérer le dossier sur ce poste
+              </button>
+            </>
+          )}
+          <button type="button" onClick={() => setStep({ kind: 'form' })}>
+            Annuler
+          </button>
+        </fieldset>
+      )}
+
+      {error && <p className="doc-error">{error}</p>}
+
+      <fieldset className="doc-panel">
+        <legend>À savoir</legend>
+        <ul className="sync-steps">
+          <li>Les comptes de connexion (e-mail + mot de passe) se créent dans Supabase ; les profils et droits ProfitPilot (code PIN) restent ceux de Paramètres › Utilisateurs et sont partagés entre les postes.</li>
+          <li>Sans Internet, on continue à travailler : les modifications partent au retour de la connexion. Seule la validation des pièces (numéro définitif) demande d'être en ligne.</li>
+          <li>Données de patients : leur hébergement est soumis à la loi 09-08 (CNDP). Choisissez une région européenne pour le projet et renseignez-vous auprès de la CNDP.</li>
+        </ul>
+      </fieldset>
+    </div>
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/sync/SyncPage.tsx"
+
+cat > src/sync/collections.ts <<'FIN_DU_FICHIER'
+// Données synchronisées : chaque clé du stockage local devient une « collection » d'enregistrements
+import { mergeDocument, protectDocument } from './merge'
+
+export interface CollectionSpec {
+  /** Nom côté serveur */
+  name: string
+  /** Clé du localStorage */
+  key: string
+  /** array : liste d'objets ayant un id ; value : une seule valeur (id « _ ») */
+  kind: 'array' | 'value'
+  /** Tableau rangé dans un champ d'un objet (array), ou objet privé de ce champ (value) */
+  field?: string
+  /** Journal : les suppressions locales (purge) ne sont jamais propagées */
+  appendOnly?: boolean
+  /** Nombre maximum d'éléments gardés sur ce poste (les plus récents selon sortKey) */
+  maxLocal?: number
+  sortKey?: string
+  /** Fusion de deux versions modifiées en parallèle (préférée, autre) */
+  merge?: (preferred: unknown, other: unknown) => unknown
+  /** Enregistrement qu'une suppression venue d'ailleurs ne doit pas effacer */
+  protect?: (record: unknown) => boolean
+  /** Compteurs : en cas de modification sur deux postes, les variations s'additionnent (stock, quantité) */
+  deltaFields?: string[]
+}
+
+export const COLLECTIONS: CollectionSpec[] = [
+  { name: 'documents', key: 'profitpilot:documents:v1', kind: 'array', merge: mergeDocument, protect: protectDocument },
+  { name: 'parties', key: 'profitpilot:parties:v1', kind: 'array' },
+  { name: 'products', key: 'profitpilot:v1', kind: 'array', field: 'products', deltaFields: ['stock'] },
+  { name: 'products-meta', key: 'profitpilot:v1', kind: 'value', field: 'products' },
+  { name: 'lots', key: 'profitpilot:lots:v1', kind: 'array', deltaFields: ['quantity'] },
+  { name: 'kits', key: 'profitpilot:kits:v1', kind: 'array' },
+  { name: 'movements', key: 'profitpilot:movements:v1', kind: 'array', appendOnly: true },
+  { name: 'fixed-costs', key: 'profitpilot:fixed:v1', kind: 'array' },
+  { name: 'users', key: 'profitpilot:users:v1', kind: 'array' },
+  { name: 'audit', key: 'profitpilot:audit:v1', kind: 'array', appendOnly: true, maxLocal: 5000, sortKey: 'at' },
+  { name: 'company', key: 'profitpilot:company:v1', kind: 'value' },
+  { name: 'access', key: 'profitpilot:access:v1', kind: 'value' },
+  { name: 'cash', key: 'profitpilot:cash:v1', kind: 'value' },
+  { name: 'currency', key: 'profitpilot:currency:v1', kind: 'value' },
+  { name: 'stock-period', key: 'profitpilot:stock-period:v1', kind: 'value' },
+]
+
+export const VALUE_ID = '_'
+
+type Rec = Record<string, unknown> & { id: string }
+
+const isRec = (x: unknown): x is Rec =>
+  typeof x === 'object' && x !== null && typeof (x as { id?: unknown }).id === 'string'
+
+function readRaw(key: string): string | null {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function parse(raw: string | null): unknown {
+  if (raw === null) return undefined
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return undefined
+  }
+}
+
+/** Enregistrements locaux d'une collection, indexés par id */
+export function readLocal(spec: CollectionSpec): Map<string, unknown> {
+  const raw = readRaw(spec.key)
+  const out = new Map<string, unknown>()
+  if (spec.kind === 'value') {
+    if (raw === null) return out
+    if (spec.field) {
+      const obj = parse(raw)
+      if (typeof obj === 'object' && obj !== null) {
+        const rest = { ...(obj as Record<string, unknown>) }
+        delete rest[spec.field]
+        out.set(VALUE_ID, rest)
+      }
+    } else out.set(VALUE_ID, { raw })
+    return out
+  }
+  const data = parse(raw)
+  const list = spec.field ? (data as Record<string, unknown> | undefined)?.[spec.field] : data
+  if (Array.isArray(list)) for (const item of list) if (isRec(item)) out.set(item.id, item)
+  return out
+}
+
+/** Écrit une collection et prévient l'application (événement « storage » comme pour un autre onglet) */
+export function writeLocal(spec: CollectionSpec, records: Map<string, unknown>, order: string[]) {
+  const oldValue = readRaw(spec.key)
+  let next: string | null
+  if (spec.kind === 'value') {
+    const v = records.get(VALUE_ID) as Record<string, unknown> | undefined
+    if (spec.field) {
+      const obj = (parse(oldValue) as Record<string, unknown> | undefined) ?? {}
+      next = JSON.stringify({ ...(v ?? {}), [spec.field]: obj[spec.field] ?? [] })
+    } else next = v && typeof v.raw === 'string' ? v.raw : null
+  } else {
+    // On garde l'ordre local existant, les nouveaux éléments à la fin
+    let list = order.filter((id) => records.has(id)).map((id) => records.get(id))
+    if (spec.maxLocal && list.length > spec.maxLocal) {
+      const key = spec.sortKey ?? 'id'
+      list = [...list]
+        .sort((a, b) => String((a as Rec)[key]).localeCompare(String((b as Rec)[key])))
+        .slice(-spec.maxLocal)
+    }
+    if (spec.field) {
+      const obj = (parse(oldValue) as Record<string, unknown> | undefined) ?? {}
+      next = JSON.stringify({ ...obj, [spec.field]: list })
+    } else next = JSON.stringify(list)
+  }
+  if (next === oldValue) return
+  if (next === null) localStorage.removeItem(spec.key)
+  else localStorage.setItem(spec.key, next)
+  window.dispatchEvent(new StorageEvent('storage', { key: spec.key, oldValue, newValue: next, storageArea: localStorage }))
+}
+
+/** Ordre actuel des ids d'une collection (pour conserver l'ordre à la réécriture) */
+export function localOrder(spec: CollectionSpec): string[] {
+  return [...readLocal(spec).keys()]
+}
+
+/** JSON à clés triées : deux objets égaux donnent toujours le même texte (le serveur réordonne les clés) */
+export function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null'
+  if (Array.isArray(value)) return '[' + value.map((v) => (v === undefined ? 'null' : stableStringify(v))).join(',') + ']'
+  const obj = value as Record<string, unknown>
+  const keys = Object.keys(obj)
+    .filter((k) => obj[k] !== undefined)
+    .sort()
+  return '{' + keys.map((k) => JSON.stringify(k) + ':' + stableStringify(obj[k])).join(',') + '}'
+}
+
+/** Empreinte courte d'un enregistrement (FNV-1a 32 bits + longueur) */
+export function fingerprint(value: unknown): string {
+  const s = stableStringify(value)
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0
+  return h.toString(36) + '.' + s.length.toString(36)
+}
+
+const same = (a: unknown, b: unknown) => stableStringify(a) === stableStringify(b)
+
+/**
+ * Fusion à trois versions, champ par champ : base = dernière version serveur connue,
+ * local = version de ce poste, remote = nouvelle version serveur.
+ * - champ changé d'un seul côté : ce changement est gardé ;
+ * - compteur changé des deux côtés : les deux variations s'additionnent (10 → 8 ici, 10 → 7 ailleurs : 5) ;
+ * - autre champ changé des deux côtés : la version de ce poste l'emporte (conflit compté).
+ */
+export function threeWayMerge(
+  base: unknown,
+  local: unknown,
+  remote: unknown,
+  deltaFields: string[] = [],
+): { result: unknown; conflict: boolean } {
+  const isObj = (x: unknown): x is Record<string, unknown> => typeof x === 'object' && x !== null && !Array.isArray(x)
+  if (!isObj(base) || !isObj(local) || !isObj(remote)) return { result: local, conflict: true }
+  const out: Record<string, unknown> = {}
+  let conflict = false
+  for (const key of new Set([...Object.keys(base), ...Object.keys(local), ...Object.keys(remote)])) {
+    const b = base[key]
+    const l = local[key]
+    const r = remote[key]
+    let v: unknown
+    if (same(l, b)) v = r
+    else if (same(r, b) || same(l, r)) v = l
+    else if (deltaFields.includes(key) && typeof b === 'number' && typeof l === 'number' && typeof r === 'number') v = r + (l - b)
+    else {
+      v = l
+      conflict = true
+    }
+    if (v !== undefined) out[key] = v
+  }
+  return { result: out, conflict }
+}
+FIN_DU_FICHIER
+echo "OK src/sync/collections.ts"
+
+cat > src/sync/config.ts <<'FIN_DU_FICHIER'
+// Configuration du mode multi-postes (stockée hors des clés « profitpilot: » : jamais synchronisée ni sauvegardée)
+
+export const CONFIG_KEY = 'profitpilot-sync:config'
+
+export interface SyncConfig {
+  /** Adresse du projet Supabase, ex. https://abcd.supabase.co */
+  url: string
+  /** Clé publique du projet (anon / publishable) */
+  anonKey: string
+  /** Identifiant du dossier partagé (une société = un dossier) */
+  dossier: string
+  /** Compte de connexion de ce poste */
+  email: string
+  refreshToken: string
+  /** Ce poste a rejoint le dossier (envoi initial ou récupération faits) */
+  joined: boolean
+}
+
+export function loadConfig(): SyncConfig | null {
+  try {
+    const raw = localStorage.getItem(CONFIG_KEY)
+    if (!raw) return null
+    const c = JSON.parse(raw) as Partial<SyncConfig>
+    if (typeof c.url !== 'string' || typeof c.anonKey !== 'string' || typeof c.dossier !== 'string') return null
+    return {
+      url: c.url,
+      anonKey: c.anonKey,
+      dossier: c.dossier,
+      email: c.email ?? '',
+      refreshToken: c.refreshToken ?? '',
+      joined: c.joined === true,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function saveConfig(config: SyncConfig | null) {
+  try {
+    if (config) localStorage.setItem(CONFIG_KEY, JSON.stringify(config))
+    else localStorage.removeItem(CONFIG_KEY)
+  } catch {
+    // stockage indisponible
+  }
+}
+
+/** Adresse nettoyée : https, sans barre finale */
+export function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '')
+}
+
+/** Code de connexion à transmettre aux autres postes (adresse, clé publique, dossier ; jamais de mot de passe) */
+export function encodeInvite(c: Pick<SyncConfig, 'url' | 'anonKey' | 'dossier'>): string {
+  const json = JSON.stringify({ u: c.url, k: c.anonKey, d: c.dossier })
+  const bytes = new TextEncoder().encode(json)
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return 'PP1-' + btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+export function decodeInvite(code: string): Pick<SyncConfig, 'url' | 'anonKey' | 'dossier'> | null {
+  try {
+    const body = code.trim().replace(/^PP1-/, '').replace(/-/g, '+').replace(/_/g, '/')
+    const bin = atob(body + '='.repeat((4 - (body.length % 4)) % 4))
+    const json = new TextDecoder().decode(Uint8Array.from(bin, (ch) => ch.charCodeAt(0)))
+    const o = JSON.parse(json) as { u?: unknown; k?: unknown; d?: unknown }
+    if (typeof o.u !== 'string' || typeof o.k !== 'string' || typeof o.d !== 'string') return null
+    return { url: o.u, anonKey: o.k, dossier: o.d }
+  } catch {
+    return null
+  }
+}
+
+/** Identifiant de dossier : minuscules, chiffres et tirets */
+export const isValidDossier = (d: string) => /^[a-z0-9][a-z0-9-]{1,40}$/.test(d)
+FIN_DU_FICHIER
+echo "OK src/sync/config.ts"
+
+cat > src/sync/engine.ts <<'FIN_DU_FICHIER'
+// Moteur de synchronisation : envoie les modifications de ce poste, applique celles des autres postes.
+// Granularité : l'enregistrement (une pièce, un client, un lot…), dernier enregistré gagnant.
+import { COLLECTIONS, VALUE_ID, fingerprint, localOrder, readLocal, threeWayMerge, writeLocal, type CollectionSpec } from './collections'
+import { AuthError, OfflineError, SupabaseRemote, type RemoteRow } from './remote'
+import { emptyState, loadState, saveState, type SyncState } from './state'
+
+export type SyncPhase = 'idle' | 'syncing' | 'ok' | 'offline' | 'auth' | 'error'
+
+export interface SyncStatus {
+  phase: SyncPhase
+  /** Dernière synchronisation réussie (ms) */
+  lastSync: number | null
+  /** Modifications locales pas encore envoyées */
+  pending: number
+  /** Modifications des deux côtés sur un même enregistrement : la version de ce poste a été gardée */
+  conflicts: number
+  message: string
+}
+
+const SEP = '␟'
+const keyOf = (collection: string, id: string) => collection + SEP + id
+/** Marge de relecture : une ligne validée côté serveur juste avant notre lecture peut porter une date un peu antérieure */
+const OVERLAP_MS = 15_000
+const INTERVAL_MS = 4_000
+
+const minus = (iso: string, ms: number) => new Date(new Date(iso).getTime() - ms).toISOString()
+/** Comparaison de dates serveur par leur valeur (indépendante du fuseau renvoyé) */
+const isLater = (a: string, b: string | null) => !b || new Date(a).getTime() > new Date(b).getTime()
+
+export class SyncEngine {
+  readonly remote: SupabaseRemote
+  private readonly dossier: string
+  private state: SyncState = emptyState()
+  private loaded = false
+  private busy: Promise<void> | null = null
+  private timer: number | null = null
+  private listeners = new Set<(s: SyncStatus) => void>()
+  status: SyncStatus = { phase: 'idle', lastSync: null, pending: 0, conflicts: 0, message: '' }
+
+  constructor(remote: SupabaseRemote, dossier: string) {
+    this.remote = remote
+    this.dossier = dossier
+  }
+
+  /** Mémorise la version serveur connue d'un enregistrement (empreinte + copie pour la fusion) */
+  private remember(k: string, data: unknown | undefined) {
+    if (data === undefined) {
+      delete this.state.base[k]
+      delete this.state.snapshot[k]
+    } else {
+      this.state.base[k] = fingerprint(data)
+      this.state.snapshot[k] = JSON.parse(JSON.stringify(data)) as unknown
+    }
+  }
+
+  subscribe(fn: (s: SyncStatus) => void): () => void {
+    this.listeners.add(fn)
+    fn(this.status)
+    return () => this.listeners.delete(fn)
+  }
+
+  private setStatus(patch: Partial<SyncStatus>) {
+    this.status = { ...this.status, ...patch }
+    for (const fn of this.listeners) fn(this.status)
+  }
+
+  start() {
+    if (this.timer !== null) return
+    void this.syncNow()
+    this.timer = window.setInterval(() => void this.syncNow(), INTERVAL_MS)
+    window.addEventListener('online', this.onOnline)
+  }
+
+  stop() {
+    if (this.timer !== null) window.clearInterval(this.timer)
+    this.timer = null
+    window.removeEventListener('online', this.onOnline)
+  }
+
+  private onOnline = () => void this.syncNow()
+
+  private async ensureLoaded() {
+    if (this.loaded) return
+    this.state = await loadState(this.dossier)
+    this.loaded = true
+  }
+
+  /** Une seule synchronisation à la fois ; un appel pendant une synchro attend la fin de celle-ci */
+  syncNow(): Promise<void> {
+    this.busy ??= this.run().finally(() => {
+      this.busy = null
+    })
+    return this.busy
+  }
+
+  private async run() {
+    this.setStatus({ phase: this.status.phase === 'ok' ? 'ok' : 'syncing' })
+    try {
+      await this.ensureLoaded()
+      const since = this.state.lastPull ? minus(this.state.lastPull, OVERLAP_MS) : null
+      this.applyRemote(await this.remote.pull(since))
+      const changes = this.localChanges()
+      if (changes.length) {
+        await this.remote.push(changes.map((c) => c.row))
+        for (const c of changes) this.remember(c.k, c.row.deleted ? undefined : c.row.data)
+      }
+      await saveState(this.dossier, this.state)
+      this.setStatus({ phase: 'ok', lastSync: Date.now(), pending: 0, message: '' })
+    } catch (e) {
+      const pending = this.loaded ? this.localChanges().length : 0
+      if (e instanceof OfflineError) this.setStatus({ phase: 'offline', pending, message: 'Hors ligne : les modifications partiront au retour de la connexion.' })
+      else if (e instanceof AuthError) this.setStatus({ phase: 'auth', pending, message: `Connexion refusée : ${e.message}` })
+      else this.setStatus({ phase: 'error', pending, message: e instanceof Error ? e.message : String(e) })
+    }
+  }
+
+  /** Applique les lignes reçues, sauf sur un enregistrement modifié localement et pas encore envoyé */
+  private applyRemote(rows: RemoteRow[]) {
+    if (rows.length === 0) return
+    const bySpec = new Map<string, RemoteRow[]>()
+    for (const r of rows) {
+      const list = bySpec.get(r.collection) ?? []
+      list.push(r)
+      bySpec.set(r.collection, list)
+      if (r.updated_at && isLater(r.updated_at, this.state.lastPull)) this.state.lastPull = r.updated_at
+    }
+    let conflicts = this.status.conflicts
+    // Les collections qui partagent une clé (articles et leur méta) sont écrites l'une après l'autre
+    for (const spec of COLLECTIONS) {
+      const incoming = bySpec.get(spec.name)
+      if (!incoming) continue
+      const local = readLocal(spec)
+      const order = localOrder(spec)
+      let changed = false
+      for (const row of incoming) {
+        const k = keyOf(spec.name, row.id)
+        if (row.updated_at && this.state.seen[k] === row.updated_at) continue
+        if (row.updated_at) this.state.seen[k] = row.updated_at
+        if (row.deleted && spec.appendOnly) continue
+        const current = local.get(row.id)
+        const localHash = current === undefined ? undefined : fingerprint(current)
+        const remoteHash = row.deleted ? undefined : fingerprint(row.data)
+        if (localHash === remoteHash) {
+          this.remember(k, row.deleted ? undefined : row.data)
+          continue
+        }
+        // Modifié sur ce poste depuis la dernière version synchronisée
+        const dirty = localHash !== this.state.base[k]
+        let result: unknown
+        if (row.deleted) {
+          if (current !== undefined && spec.protect?.(current)) result = current // pièce validée : on la garde et on la renvoie
+          else if (dirty) {
+            conflicts++ // modifié ici, supprimé ailleurs : la modification l'emporte
+            continue
+          } else result = undefined
+        } else if (current === undefined) {
+          if (dirty && !spec.protect?.(row.data)) {
+            conflicts++ // supprimé ici, modifié ailleurs : la suppression l'emporte
+            continue
+          }
+          result = row.data
+        } else if (spec.merge) {
+          // Règles métier : jamais de retour en arrière d'une pièce, règlements additionnés
+          result = dirty ? spec.merge(current, row.data) : spec.merge(row.data, current)
+          if (dirty) conflicts++
+        } else if (dirty) {
+          // Modifié des deux côtés : fusion champ par champ à partir de la dernière version commune
+          const base = this.state.snapshot[k]
+          if (base === undefined) {
+            conflicts++ // pas de version commune : la version de ce poste sera envoyée
+            continue
+          }
+          const merged = threeWayMerge(base, current, row.data, spec.deltaFields)
+          if (merged.conflict) conflicts++
+          result = merged.result
+        } else result = row.data
+
+        // La version serveur devient la référence ; si le résultat en diffère, il sera renvoyé
+        this.remember(k, row.deleted ? undefined : row.data)
+        if (result === undefined) {
+          if (local.delete(row.id)) changed = true
+        } else if (fingerprint(result) !== localHash) {
+          if (!local.has(row.id)) order.push(row.id)
+          local.set(row.id, result)
+          changed = true
+        }
+      }
+      if (changed) writeLocal(spec, local, order)
+    }
+    if (conflicts !== this.status.conflicts) this.setStatus({ conflicts })
+  }
+
+  /** Enregistrements locaux différents de leur dernière version synchronisée */
+  private localChanges(): { k: string; hash: string | undefined; row: RemoteRow }[] {
+    const out: { k: string; hash: string | undefined; row: RemoteRow }[] = []
+    for (const spec of COLLECTIONS) {
+      const local = readLocal(spec)
+      for (const [id, data] of local) {
+        const k = keyOf(spec.name, id)
+        const hash = fingerprint(data)
+        if (this.state.base[k] !== hash) out.push({ k, hash, row: { collection: spec.name, id, data, deleted: false } })
+      }
+      if (spec.appendOnly) continue
+      // Supprimé sur ce poste depuis la dernière synchro : on propage la suppression
+      const prefix = spec.name + SEP
+      for (const k of Object.keys(this.state.base)) {
+        if (!k.startsWith(prefix)) continue
+        const id = k.slice(prefix.length)
+        if (!local.has(id)) out.push({ k, hash: undefined, row: { collection: spec.name, id, data: null, deleted: true } })
+      }
+    }
+    return out
+  }
+
+  pendingCount(): number {
+    return this.loaded ? this.localChanges().length : 0
+  }
+
+  /** Premier poste : envoie toutes les données locales vers un dossier en ligne vide */
+  async uploadAll(): Promise<number> {
+    this.state = emptyState()
+    this.loaded = true
+    const changes = this.localChanges()
+    await this.remote.push(changes.map((c) => c.row))
+    for (const c of changes) if (!c.row.deleted) this.remember(c.k, c.row.data)
+    // La relecture suivante reprendra nos propres envois (sans effet : empreintes identiques)
+    await saveState(this.dossier, this.state)
+    return changes.length
+  }
+
+  /** Nouveau poste : remplace les données locales par celles du dossier en ligne */
+  async downloadAll(): Promise<number> {
+    const rows = await this.remote.pull(null)
+    const state = emptyState()
+    const bySpec = new Map<string, RemoteRow[]>()
+    for (const r of rows) {
+      bySpec.set(r.collection, [...(bySpec.get(r.collection) ?? []), r])
+      if (r.updated_at) {
+        state.seen[keyOf(r.collection, r.id)] = r.updated_at
+        if (isLater(r.updated_at, state.lastPull)) state.lastPull = r.updated_at
+      }
+    }
+    let count = 0
+    for (const spec of COLLECTIONS) {
+      const records = new Map<string, unknown>()
+      const order: string[] = []
+      for (const r of bySpec.get(spec.name) ?? []) {
+        if (r.deleted) continue
+        records.set(r.id, r.data)
+        order.push(r.id)
+        state.base[keyOf(spec.name, r.id)] = fingerprint(r.data)
+        state.snapshot[keyOf(spec.name, r.id)] = r.data
+        count++
+      }
+      // Collection absente en ligne : on l'efface localement (sauf réglages sans valeur en ligne)
+      if (records.size === 0 && spec.kind === 'value') {
+        if (!bySpec.has(spec.name)) continue
+      }
+      writeLocal(spec, records, order)
+    }
+    this.state = state
+    this.loaded = true
+    await saveState(this.dossier, this.state)
+    return count
+  }
+}
+
+/** Valeur « _ » d'une collection de type value : exportée pour les tests */
+export const VALUE_RECORD_ID = VALUE_ID
+export type { CollectionSpec }
+FIN_DU_FICHIER
+echo "OK src/sync/engine.ts"
+
+cat > src/sync/merge.ts <<'FIN_DU_FICHIER'
+// Règles métier appliquées quand une pièce a changé sur deux postes à la fois
+import { computeTotals } from '../documents/tva'
+import type { CommercialDocument, DocStatus, Payment } from '../documents/types'
+
+/** Une pièce avance (brouillon → validée → réglée / annulée) et ne recule jamais */
+const RANK: Record<DocStatus, number> = { draft: 0, validated: 1, paid: 2, cancelled: 3 }
+
+const isDoc = (x: unknown): x is CommercialDocument =>
+  typeof x === 'object' && x !== null && typeof (x as { status?: unknown }).status === 'string'
+
+const rank = (d: CommercialDocument) => RANK[d.status] ?? 0
+
+/**
+ * Fusion de deux versions d'une même pièce :
+ * - la version la plus avancée l'emporte (une copie « brouillon » périmée n'annule jamais une validation) ;
+ * - à avancement égal, la version préférée l'emporte ;
+ * - les règlements des deux versions sont additionnés (deux encaissements saisis sur deux postes).
+ */
+export function mergeDocument(preferred: unknown, other: unknown): unknown {
+  if (!isDoc(preferred) || !isDoc(other)) return preferred
+  const winner = rank(other) > rank(preferred) ? other : preferred
+  const payments = new Map<string, Payment>()
+  for (const p of [...(preferred.payments ?? []), ...(other.payments ?? [])]) if (!payments.has(p.id)) payments.set(p.id, p)
+  if (payments.size === 0) return winner
+  const merged = [...payments.values()].sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id))
+  // Deux acomptes saisis sur deux postes peuvent solder la facture à eux deux
+  const paid = merged.reduce((sum, p) => sum + p.amount, 0)
+  const settled =
+    (winner.kind === 'invoice' || winner.kind === 'bill') &&
+    winner.status === 'validated' &&
+    paid >= computeTotals(winner).netToPay - 0.01
+  return { ...winner, payments: merged, ...(settled ? { status: 'paid' as const } : {}) }
+}
+
+/** Une pièce validée ne peut pas être supprimée (seuls les brouillons le peuvent) */
+export function protectDocument(record: unknown): boolean {
+  return isDoc(record) && record.status !== 'draft'
+}
+FIN_DU_FICHIER
+echo "OK src/sync/merge.ts"
+
+cat > src/sync/remote.ts <<'FIN_DU_FICHIER'
+// Client de la base en ligne (Supabase : authentification GoTrue + API REST PostgREST), en fetch simple
+
+export interface RemoteRow {
+  collection: string
+  id: string
+  data: unknown
+  deleted: boolean
+  updated_at?: string
+  updated_by?: string | null
+}
+
+export interface Session {
+  accessToken: string
+  refreshToken: string
+  /** Expiration du jeton d'accès (ms depuis 1970) */
+  expiresAt: number
+  email: string
+}
+
+/** Réseau injoignable : on réessaiera plus tard */
+export class OfflineError extends Error {}
+/** Connexion refusée ou expirée : il faut se reconnecter */
+export class AuthError extends Error {}
+/** Erreur renvoyée par le serveur */
+export class RemoteError extends Error {}
+
+const PAGE = 1000
+const PUSH_CHUNK = 200
+
+async function send(input: string, init: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init)
+  } catch {
+    throw new OfflineError('Serveur injoignable')
+  }
+}
+
+async function errorText(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as Record<string, unknown>
+    return String(body.error_description ?? body.msg ?? body.message ?? body.error ?? res.statusText)
+  } catch {
+    return res.statusText || `Erreur ${res.status}`
+  }
+}
+
+interface TokenResponse {
+  access_token: string
+  refresh_token: string
+  expires_in: number
+  user?: { email?: string }
+}
+
+function toSession(t: TokenResponse, email: string): Session {
+  return {
+    accessToken: t.access_token,
+    refreshToken: t.refresh_token,
+    expiresAt: Date.now() + (t.expires_in ?? 3600) * 1000,
+    email: t.user?.email ?? email,
+  }
+}
+
+export class SupabaseRemote {
+  private session: Session | null = null
+  private refreshing: Promise<Session> | null = null
+  private readonly url: string
+  private readonly anonKey: string
+  private readonly dossier: string
+  /** Appelé quand le jeton de rafraîchissement change (à enregistrer) */
+  onSession?: (s: Session) => void
+
+  constructor(url: string, anonKey: string, dossier: string, refreshToken?: string, email = '') {
+    this.url = url
+    this.anonKey = anonKey
+    this.dossier = dossier
+    if (refreshToken) this.session = { accessToken: '', refreshToken, expiresAt: 0, email }
+  }
+
+  /** Connexion par e-mail et mot de passe */
+  async signIn(email: string, password: string): Promise<Session> {
+    const res = await send(`${this.url}/auth/v1/token?grant_type=password`, {
+      method: 'POST',
+      headers: { apikey: this.anonKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    })
+    if (!res.ok) throw new AuthError(await errorText(res))
+    this.session = toSession((await res.json()) as TokenResponse, email)
+    this.onSession?.(this.session)
+    return this.session
+  }
+
+  private async refresh(): Promise<Session> {
+    const current = this.session
+    if (!current?.refreshToken) throw new AuthError('Session absente')
+    const res = await send(`${this.url}/auth/v1/token?grant_type=refresh_token`, {
+      method: 'POST',
+      headers: { apikey: this.anonKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refresh_token: current.refreshToken }),
+    })
+    if (!res.ok) {
+      if (res.status >= 500) throw new RemoteError(await errorText(res))
+      throw new AuthError(await errorText(res))
+    }
+    this.session = toSession((await res.json()) as TokenResponse, current.email)
+    this.onSession?.(this.session)
+    return this.session
+  }
+
+  private async accessToken(force = false): Promise<string> {
+    if (!this.session) throw new AuthError('Non connecté')
+    if (force || this.session.expiresAt - 60_000 < Date.now()) {
+      // Un seul rafraîchissement à la fois
+      this.refreshing ??= this.refresh().finally(() => {
+        this.refreshing = null
+      })
+      await this.refreshing
+    }
+    return this.session.accessToken
+  }
+
+  private async rest(path: string, init: RequestInit & { headers?: Record<string, string> } = {}): Promise<Response> {
+    const call = async (force: boolean) =>
+      send(`${this.url}/rest/v1/${path}`, {
+        ...init,
+        headers: {
+          apikey: this.anonKey,
+          Authorization: `Bearer ${await this.accessToken(force)}`,
+          'Content-Type': 'application/json',
+          ...init.headers,
+        },
+      })
+    let res = await call(false)
+    // Jeton expiré entre-temps : un nouvel essai après rafraîchissement
+    if (res.status === 401) res = await call(true)
+    if (res.status === 401 || res.status === 403) throw new AuthError(await errorText(res))
+    if (!res.ok) throw new RemoteError(await errorText(res))
+    return res
+  }
+
+  private filter(): string {
+    return `dossier=eq.${encodeURIComponent(this.dossier)}`
+  }
+
+  /** Lignes modifiées depuis une date (toutes si null), par pages de 1 000 */
+  async pull(since: string | null): Promise<RemoteRow[]> {
+    const rows: RemoteRow[] = []
+    for (let offset = 0; ; offset += PAGE) {
+      const params = [
+        'select=collection,id,data,deleted,updated_at,updated_by',
+        this.filter(),
+        since ? `updated_at=gte.${encodeURIComponent(since)}` : '',
+        'order=updated_at.asc,collection.asc,id.asc',
+        `limit=${PAGE}`,
+        `offset=${offset}`,
+      ].filter(Boolean)
+      const res = await this.rest(`records?${params.join('&')}`)
+      const page = (await res.json()) as RemoteRow[]
+      rows.push(...page)
+      if (page.length < PAGE) return rows
+    }
+  }
+
+  /** Envoi (insertion ou mise à jour) par paquets */
+  async push(rows: RemoteRow[]): Promise<void> {
+    for (let i = 0; i < rows.length; i += PUSH_CHUNK) {
+      const chunk = rows.slice(i, i + PUSH_CHUNK).map((r) => ({
+        dossier: this.dossier,
+        collection: r.collection,
+        id: r.id,
+        data: r.data,
+        deleted: r.deleted,
+      }))
+      await this.rest('records', {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(chunk),
+      })
+    }
+  }
+
+  /** Le compte connecté figure-t-il dans la liste des membres du dossier ? */
+  async isMember(): Promise<boolean> {
+    const res = await this.rest(`members?select=dossier&${this.filter()}`)
+    return ((await res.json()) as unknown[]).length > 0
+  }
+
+  /** Nombre d'enregistrements du dossier en ligne */
+  async count(): Promise<number> {
+    const res = await this.rest(`records?select=id&${this.filter()}&deleted=is.false`, {
+      headers: { Prefer: 'count=exact', Range: '0-0' },
+    })
+    const range = res.headers.get('Content-Range') ?? ''
+    const total = Number(range.split('/')[1])
+    return Number.isFinite(total) ? total : (await res.json()).length
+  }
+
+  /** Prochain numéro de pièce, attribué par le serveur (aucun doublon entre postes) */
+  async nextNumber(kind: string, year: number, min: number): Promise<number> {
+    const res = await this.rest('rpc/next_number', {
+      method: 'POST',
+      body: JSON.stringify({ p_dossier: this.dossier, p_kind: kind, p_year: year, p_min: min }),
+    })
+    const value = (await res.json()) as unknown
+    const n = Number(value)
+    if (!Number.isInteger(n) || n < 1) throw new RemoteError('Numéro invalide reçu du serveur')
+    return n
+  }
+}
+FIN_DU_FICHIER
+echo "OK src/sync/remote.ts"
+
+cat > src/sync/runtime.ts <<'FIN_DU_FICHIER'
+// Instance unique du moteur de synchronisation pour ce poste
+import { useSyncExternalStore } from 'react'
+import { loadConfig, saveConfig, type SyncConfig } from './config'
+import { SyncEngine, type SyncStatus } from './engine'
+import { SupabaseRemote } from './remote'
+
+let engine: SyncEngine | null = null
+let status: SyncStatus | null = null
+const listeners = new Set<() => void>()
+let unsubscribe: (() => void) | null = null
+
+function notify() {
+  for (const fn of listeners) fn()
+}
+
+/** Crée le client et le moteur pour une configuration (sans démarrer la synchro automatique) */
+export function createEngine(config: SyncConfig): SyncEngine {
+  stopEngine()
+  const remote = new SupabaseRemote(config.url, config.anonKey, config.dossier, config.refreshToken, config.email)
+  // Le jeton de rafraîchissement change à chaque renouvellement : on garde le dernier
+  remote.onSession = (s) => {
+    const current = loadConfig()
+    if (current) saveConfig({ ...current, refreshToken: s.refreshToken, email: s.email })
+  }
+  engine = new SyncEngine(remote, config.dossier)
+  unsubscribe = engine.subscribe((s) => {
+    status = s
+    notify()
+  })
+  return engine
+}
+
+/** Au lancement : reprend la synchro si ce poste a rejoint un dossier */
+export function startFromConfig() {
+  const config = loadConfig()
+  if (!config?.joined || engine) return
+  createEngine(config).start()
+}
+
+export function stopEngine() {
+  engine?.stop()
+  unsubscribe?.()
+  unsubscribe = null
+  engine = null
+  status = null
+  notify()
+}
+
+export function currentEngine(): SyncEngine | null {
+  return engine
+}
+
+/** Mode multi-postes actif sur ce poste */
+export function isSyncActive(): boolean {
+  return engine !== null && loadConfig()?.joined === true
+}
+
+/**
+ * Numéro définitif attribué par le serveur (null en mode un seul poste).
+ * Lève une erreur hors ligne : on ne valide pas de pièce sans numéro partagé, pour éviter tout doublon.
+ */
+export async function allocateNumber(kind: string, year: number, min: number): Promise<number | null> {
+  if (!isSyncActive() || !engine) return null
+  return engine.remote.nextNumber(kind, year, min)
+}
+
+export function useSyncStatus(): SyncStatus | null {
+  return useSyncExternalStore(
+    (fn) => {
+      listeners.add(fn)
+      return () => listeners.delete(fn)
+    },
+    () => status,
+  )
+}
+FIN_DU_FICHIER
+echo "OK src/sync/runtime.ts"
+
+cat > src/sync/state.ts <<'FIN_DU_FICHIER'
+// État de synchronisation de ce poste, rangé dans IndexedDB (pas dans le localStorage limité à 5 Mo)
+
+export interface SyncState {
+  /** Empreinte de chaque enregistrement tel que synchronisé : « collection␟id » → empreinte */
+  base: Record<string, string>
+  /** Date serveur de la dernière version vue : « collection␟id » → updated_at */
+  seen: Record<string, string>
+  /** Date serveur la plus récente reçue */
+  lastPull: string | null
+  /** Dernière version serveur connue de chaque enregistrement (fusion à trois versions) */
+  snapshot: Record<string, unknown>
+}
+
+const DB = 'profitpilot-sync'
+const STORE = 'kv'
+
+export const emptyState = (): SyncState => ({ base: {}, seen: {}, lastPull: null, snapshot: {} })
+
+function open(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') return reject(new Error('IndexedDB indisponible'))
+    const req = indexedDB.open(DB, 1)
+    req.onupgradeneeded = () => req.result.createObjectStore(STORE)
+    req.onsuccess = () => resolve(req.result)
+    req.onerror = () => reject(req.error)
+  })
+}
+
+export async function loadState(dossier: string): Promise<SyncState> {
+  try {
+    const db = await open()
+    return await new Promise((resolve) => {
+      const req = db.transaction(STORE, 'readonly').objectStore(STORE).get(dossier)
+      req.onsuccess = () => resolve({ ...emptyState(), ...((req.result as SyncState | undefined) ?? {}) })
+      req.onerror = () => resolve(emptyState())
+    })
+  } catch {
+    return emptyState()
+  }
+}
+
+/**
+ * Enregistre l'état. Si IndexedDB est indisponible (navigation privée…), l'état reste en mémoire :
+ * la synchronisation continue, seul un rechargement de la page la fera repartir de zéro.
+ */
+export async function saveState(dossier: string, state: SyncState): Promise<void> {
+  try {
+    const db = await open()
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STORE, 'readwrite')
+      tx.objectStore(STORE).put(state, dossier)
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+    })
+  } catch {
+    // IndexedDB indisponible : état gardé en mémoire
+  }
+}
+
+export async function clearState(dossier: string): Promise<void> {
+  try {
+    const db = await open()
+    await new Promise<void>((resolve) => {
+      const tx = db.transaction(STORE, 'readwrite')
+      tx.objectStore(STORE).delete(dossier)
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => resolve()
+    })
+  } catch {
+    // rien à effacer
+  }
+}
+FIN_DU_FICHIER
+echo "OK src/sync/state.ts"
+
+cat > src/sync/sync.css <<'FIN_DU_FICHIER'
+.sync-small { font-size: 13px !important; word-break: break-all; }
+.sync-steps { margin: 4px 0 8px; padding-left: 20px; line-height: 1.6; }
+.sync-invite { display: flex; gap: 8px; align-items: center; }
+.sync-invite code {
+  flex: 1;
+  padding: 6px 8px;
+  background: #f4f6f9;
+  border: 1px solid var(--pp-border);
+  border-radius: 3px;
+  font-size: 12px;
+  word-break: break-all;
+}
+FIN_DU_FICHIER
+echo "OK src/sync/sync.css"
+
 cat > src/pro-theme.css <<'FIN_DU_FICHIER'
 /*
  * Thème « progiciel de gestion » (inspiré de Sage 100) : navigation à gauche en sections,
@@ -8280,7 +9655,7 @@ FIN_DU_FICHIER
 echo "OK src/components/Dashboard.tsx"
 
 cat > src/App.tsx <<'FIN_DU_FICHIER'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FixedCost, PageId, Product } from './types'
 import { sampleProducts } from './data/sampleProducts'
 import Sidebar from './components/Sidebar'
@@ -8323,6 +9698,8 @@ import Launchpad from './shell/Launchpad'
 import { ADMIN_PAGES, MODULES, moduleOf, type ModuleId } from './shell/navigation'
 import { LAST_BACKUP_KEY, STORAGE_ERROR_EVENT } from './documents/storage'
 import { AccessContext, accessFor } from './access/context'
+import SyncPage from './sync/SyncPage'
+import { startFromConfig, useSyncStatus } from './sync/runtime'
 import { readSession, useAccessSettings, useAudit, useUsers, writeSession } from './access/storage'
 import type { AuditEntry, User } from './access/types'
 import LoginScreen from './access/LoginScreen'
@@ -8373,6 +9750,7 @@ const titles: Record<PageId, string> = {
   company: 'Société et mise en page des documents',
   backup: 'Sauvegarde des données',
   users: 'Utilisateurs et droits d’accès',
+  sync: 'Multi-postes : utiliser l’ERP sur plusieurs ordinateurs',
   audit: 'Journal d’activité',
 }
 
@@ -8417,6 +9795,7 @@ const commercialPages = new Set<PageId>([
   'backup',
   'users',
   'audit',
+  'sync',
 ] as PageId[])
 
 function isProduct(x: unknown): x is Product {
@@ -8593,11 +9972,32 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(FIXED_KEY, JSON.stringify(fixedCosts))
+      const raw = JSON.stringify(fixedCosts)
+      if (localStorage.getItem(FIXED_KEY) !== raw) localStorage.setItem(FIXED_KEY, raw)
     } catch {
-      // stockage indisponible : on continue sans sauvegarde
+      window.dispatchEvent(new CustomEvent(STORAGE_ERROR_EVENT, { detail: FIXED_KEY }))
     }
   }, [fixedCosts])
+
+  // Charges fixes et devise modifiées sur un autre poste ou un autre onglet
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === FIXED_KEY) setFixedCosts(loadFixedCosts())
+      if (e.key === CURRENCY_KEY) {
+        const code = loadCurrency()
+        setCurrency(code)
+        setCurrencyState(code)
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => window.removeEventListener('storage', onStorage)
+  }, [])
+
+  // Mode multi-postes : reprise de la synchronisation au lancement
+  useEffect(() => {
+    startFromConfig()
+  }, [])
+  const syncStatus = useSyncStatus()
 
   function changeCurrency(code: string) {
     setCurrency(code)
@@ -8670,8 +10070,15 @@ export default function App() {
   }
 
   // BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
+  // Dernières valeurs connues : un mouvement de stock peut suivre une attente réseau (validation multi-postes)
+  const latest = useRef({ products, lots })
+  useEffect(() => {
+    latest.current = { products, lots }
+  }, [products, lots])
+
   function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string): Record<string, number> {
-    const result = applyMove({ products, lots }, lines, direction, supplier, reference)
+    const result = applyMove(latest.current, lines, direction, supplier, reference)
+    latest.current = { products: result.products, lots: result.lots }
     handleEdit(result.products)
     setLots(result.lots)
     addMovements(result.movements)
@@ -8979,11 +10386,19 @@ export default function App() {
           />
         )}
         {page === 'audit' && <AuditPage entries={audit} />}
+        {page === 'sync' && <SyncPage />}
         </ReadOnlyArea>
         )}
       </main>
       </div>
-      <StatusBar companyName={company.name} documentsCount={documents.length} productsCount={products.length} lastBackup={lastBackup} />
+      <StatusBar
+        companyName={company.name}
+        documentsCount={documents.length}
+        productsCount={products.length}
+        lastBackup={lastBackup}
+        sync={syncStatus}
+        onOpenSync={() => navigate('sync')}
+      />
       {searchOpen && (
         <GlobalSearch
           documents={searchable.documents}
@@ -9001,8 +10416,238 @@ export default function App() {
 FIN_DU_FICHIER
 echo "OK src/App.tsx"
 
+cat > supabase/schema.sql <<'FIN_DU_FICHIER'
+-- ProfitPilot ERP : préparation de la base en ligne (Supabase)
+-- À exécuter UNE fois : Supabase › SQL Editor › New query › coller ce fichier › Run.
+-- Le script peut être relancé sans danger.
+
+-- 1. Membres : quels comptes (e-mails) ont accès à quel dossier
+create table if not exists public.members (
+  dossier text not null,
+  email   text not null,
+  primary key (dossier, email)
+);
+
+-- 2. Données : un enregistrement par pièce, client, article, lot, réglage…
+create table if not exists public.records (
+  dossier    text        not null,
+  collection text        not null,
+  id         text        not null,
+  data       jsonb,
+  deleted    boolean     not null default false,
+  updated_at timestamptz not null default now(),
+  updated_by text,
+  primary key (dossier, collection, id)
+);
+create index if not exists records_sync_idx on public.records (dossier, updated_at);
+
+-- 3. Compteurs de numérotation partagés (aucun doublon de numéro entre postes)
+create table if not exists public.counters (
+  dossier text    not null,
+  kind    text    not null,
+  year    integer not null,
+  last    integer not null default 0,
+  primary key (dossier, kind, year)
+);
+
+-- Date et auteur posés par le serveur (l'horloge des postes n'est jamais utilisée)
+create or replace function public.touch_record() returns trigger
+language plpgsql set search_path = public as $$
+begin
+  new.updated_at := clock_timestamp();
+  new.updated_by := auth.jwt() ->> 'email';
+  return new;
+end $$;
+
+drop trigger if exists records_touch on public.records;
+create trigger records_touch before insert or update on public.records
+for each row execute function public.touch_record();
+
+-- Appartenance du compte connecté à un dossier
+create or replace function public.is_member(p_dossier text) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (
+    select 1 from public.members m
+    where m.dossier = p_dossier
+      and lower(m.email) = lower(coalesce(auth.jwt() ->> 'email', ''))
+  );
+$$;
+
+-- Règles d'accès (RLS) : chacun ne voit et ne modifie que les dossiers dont il est membre
+alter table public.members  enable row level security;
+alter table public.records  enable row level security;
+alter table public.counters enable row level security;
+
+drop policy if exists members_read_own on public.members;
+create policy members_read_own on public.members
+  for select to authenticated
+  using (lower(email) = lower(coalesce(auth.jwt() ->> 'email', '')));
+
+drop policy if exists records_read on public.records;
+create policy records_read on public.records
+  for select to authenticated using (public.is_member(dossier));
+
+drop policy if exists records_insert on public.records;
+create policy records_insert on public.records
+  for insert to authenticated with check (public.is_member(dossier));
+
+drop policy if exists records_update on public.records;
+create policy records_update on public.records
+  for update to authenticated
+  using (public.is_member(dossier)) with check (public.is_member(dossier));
+-- Pas de règle de suppression : on ne supprime jamais, on marque « deleted »
+
+-- Droits au plus juste : Supabase donne par défaut tous les droits (y compris DELETE et TRUNCATE,
+-- que les règles RLS ne couvrent pas). On les retire puis on n'accorde que le nécessaire.
+revoke all on public.members, public.records, public.counters from anon, authenticated;
+grant select on public.members to authenticated;
+grant select, insert, update on public.records to authenticated;
+
+-- Prochain numéro de pièce : verrou sur le compteur, donc deux postes ne reçoivent jamais le même
+create or replace function public.next_number(p_dossier text, p_kind text, p_year integer, p_min integer)
+returns integer
+language plpgsql security definer set search_path = public as $$
+declare v integer;
+begin
+  if not public.is_member(p_dossier) then
+    raise exception 'Accès refusé au dossier %', p_dossier using errcode = '42501';
+  end if;
+  insert into public.counters as c (dossier, kind, year, last)
+  values (p_dossier, p_kind, p_year, greatest(p_min, 0) + 1)
+  on conflict (dossier, kind, year)
+  do update set last = greatest(c.last, excluded.last - 1) + 1
+  returning c.last into v;
+  return v;
+end $$;
+
+revoke all on function public.next_number(text, text, integer, integer) from public, anon;
+grant execute on function public.next_number(text, text, integer, integer) to authenticated;
+revoke all on function public.is_member(text) from public, anon;
+grant execute on function public.is_member(text) to authenticated;
+
+-- 4. Ajoutez ici les comptes autorisés (un par ligne), puis exécutez :
+-- insert into public.members (dossier, email) values
+--   ('orthomed', 'admin@votre-societe.ma'),
+--   ('orthomed', 'poste-magasin@votre-societe.ma')
+-- on conflict do nothing;
+FIN_DU_FICHIER
+echo "OK supabase/schema.sql"
+
+cat > docs/MULTIPOSTE.md <<'FIN_DU_FICHIER'
+# Utiliser ProfitPilot sur plusieurs ordinateurs
+
+Les données sont rangées dans une **base en ligne Supabase** partagée par tous vos ordinateurs.
+Chaque pièce, client, article ou lot est synchronisé séparément toutes les 4 secondes environ.
+Les numéros de pièces sont attribués par le serveur : deux postes ne peuvent jamais donner le même numéro.
+
+Durée : environ 15 minutes, une seule fois.
+
+---
+
+## Étape 1 — Créer le projet Supabase (gratuit pour démarrer)
+
+1. Allez sur **https://supabase.com** › *Start your project* et créez un compte.
+2. *New project* :
+   - **Name** : `profitpilot`
+   - **Database Password** : un mot de passe solide, à garder précieusement
+   - **Region** : une région **européenne** (par exemple *West EU (Paris)* ou *Central EU (Frankfurt)*), la plus proche du Maroc
+3. Attendez 1 à 2 minutes que le projet soit prêt.
+
+## Étape 2 — Préparer la base (copier-coller)
+
+1. Dans le projet : menu de gauche › **SQL Editor** › **New query**.
+2. Ouvrez le fichier `supabase/schema.sql` de ProfitPilot, copiez **tout** son contenu, collez-le, puis cliquez **Run**.
+   Le message *Success* doit s'afficher. (Le script peut être relancé sans danger.)
+
+## Étape 3 — Créer les comptes de connexion des ordinateurs
+
+Chaque ordinateur (ou chaque employé) se connecte avec un e-mail et un mot de passe.
+
+1. Menu **Authentication** › **Users** › **Add user** › **Create new user**.
+2. Saisissez l'e-mail et le mot de passe, cochez **Auto Confirm User**, puis **Create user**.
+3. Recommencez pour chaque ordinateur ou employé.
+
+## Étape 4 — Autoriser ces comptes sur votre dossier
+
+Le « dossier » est le nom de votre société dans la base, en minuscules, par exemple `orthomed`.
+
+1. Menu **SQL Editor** › **New query**, collez (en remplaçant les e-mails) puis **Run** :
+
+```sql
+insert into public.members (dossier, email) values
+  ('orthomed', 'admin@votre-societe.ma'),
+  ('orthomed', 'magasin@votre-societe.ma')
+on conflict do nothing;
+```
+
+Pour retirer l'accès à quelqu'un plus tard :
+
+```sql
+delete from public.members where dossier = 'orthomed' and email = 'ancien@votre-societe.ma';
+```
+
+## Étape 5 — Récupérer l'adresse et la clé publique
+
+Menu **Project Settings** › **API** (ou *Data API* / *API Keys*) :
+- **Project URL** : `https://xxxxxxxx.supabase.co`
+- **Clé publique** : la clé `anon` *public* (ou *publishable*). **Jamais** la clé `service_role` / *secret*.
+
+## Étape 6 — Premier ordinateur (celui qui a déjà vos données)
+
+1. **Faites d'abord une sauvegarde** : Paramètres › Sauvegarde › *Télécharger une sauvegarde complète*.
+2. Paramètres › Administration › **Multi-postes**.
+3. Remplissez : adresse du projet, clé publique, nom du dossier (`orthomed`), e-mail et mot de passe de ce poste.
+4. **Se connecter**, puis **Envoyer les données de ce poste**.
+5. La barre d'état en bas affiche « ● Synchronisé à … ». Copiez le **code de connexion** affiché.
+
+## Étape 7 — Chaque autre ordinateur
+
+1. Ouvrez ProfitPilot sur cet ordinateur (voir « Mettre l'application en ligne » ci-dessous).
+2. Paramètres › Administration › **Multi-postes**.
+3. Collez le **code de connexion**, saisissez l'e-mail et le mot de passe de ce poste, **Se connecter**.
+4. **Récupérer le dossier sur ce poste** : l'application se recharge avec les données partagées.
+
+C'est fini : ce que vous saisissez sur un poste apparaît sur les autres en quelques secondes.
+
+---
+
+## Mettre l'application en ligne (pour l'ouvrir sur n'importe quel ordinateur)
+
+Sans cette étape, chaque ordinateur doit avoir une copie du projet et lancer `npm run dev`.
+Le plus simple est de publier l'application une fois :
+
+1. Dans le terminal, dans le dossier du projet : `npm run build` (crée un dossier `dist`).
+2. Allez sur **https://app.netlify.com/drop** (compte gratuit) et **glissez le dossier `dist`** dans la page.
+3. Netlify donne une adresse du type `https://profitpilot-xxxx.netlify.app` : ouvrez-la sur chaque ordinateur
+   (et ajoutez-la aux favoris).
+
+À chaque mise à jour de ProfitPilot : `npm run build`, puis glissez à nouveau `dist` sur la page *Deploys* du site Netlify.
+L'adresse est publique, mais les données restent protégées : il faut un compte autorisé sur le dossier pour les voir.
+
+---
+
+## Bon à savoir
+
+- **Connexion Internet** : sans Internet, on continue à travailler ; les modifications partent au retour de la
+  connexion (« Hors ligne · N modification(s) en attente » en bas de l'écran). Seule la **validation** d'une pièce
+  demande d'être en ligne, car son numéro définitif vient du serveur.
+- **Deux personnes sur la même pièce** : la dernière modification enregistrée l'emporte, avec deux exceptions :
+  une pièce validée ne revient jamais en brouillon et ne peut pas être supprimée par un autre poste, et les
+  règlements saisis sur deux postes s'additionnent.
+- **Utilisateurs et droits** : les profils ProfitPilot (code PIN, droits par module) sont partagés entre les postes.
+  Le compte Supabase sert à autoriser l'ordinateur ; le code PIN identifie la personne.
+- **Sauvegardes** : continuez à télécharger une sauvegarde de temps en temps. Supabase fait aussi des sauvegardes
+  quotidiennes sur les offres payantes.
+- **Données de patients (loi 09-08)** : les noms de patients sont des données de santé. Leur hébergement à l'étranger
+  est encadré par la **CNDP** : renseignez-vous (déclaration ou autorisation de transfert) avant d'y saisir des noms
+  de patients, ou utilisez seulement des numéros de dossier.
+- **Désactiver** : Paramètres › Multi-postes › *Déconnecter ce poste*. Les données restent sur l'ordinateur mais ne
+  sont plus partagées.
+FIN_DU_FICHIER
+echo "OK docs/MULTIPOSTE.md"
+
 # Nouvelles pages dans le type PageId
-for id in users audit home stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
+for id in sync users audit home stats schedule movements inventory alerts quotes orders deliveries depots invoices credits clients purchases receipts bills suppliers lots kits vat company backup; do
   grep -q "'$id'" src/types.ts || sed -i.tmp "s/'decision'/'decision' | '$id'/" src/types.ts
 done
 rm -f src/types.ts.tmp

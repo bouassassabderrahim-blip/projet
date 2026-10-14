@@ -1,4 +1,5 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { allocateNumber, isSyncActive } from '../sync/runtime'
 import type { Product } from '../types'
 import { useAccess } from '../access/context'
 import DocumentEditor from './DocumentEditor'
@@ -174,15 +175,50 @@ export default function DocumentsPage({
 		setView({ mode: 'list' })
 	}
 
-	function setStatus(doc: CommercialDocument, status: DocStatus) {
+	// Pièces les plus récentes (la synchronisation peut en apporter pendant une attente réseau)
+	const docsRef = useRef(documents)
+	useEffect(() => {
+		docsRef.current = documents
+	}, [documents])
+	const [validating, setValidating] = useState<string | null>(null)
+
+	async function setStatus(doc: CommercialDocument, status: DocStatus) {
+		if (status === 'validated' && doc.status === 'draft' && isSyncActive()) {
+			// Multi-postes : le numéro définitif vient du serveur, pour qu'aucun autre poste ne puisse l'attribuer
+			const local = finalNumber(doc, documents)
+			const prefix = local.slice(0, local.lastIndexOf('-') + 1)
+			setValidating(doc.id)
+			let seq: number | null
+			try {
+				seq = await allocateNumber(doc.kind, Number(doc.date.slice(0, 4)), Number(local.slice(prefix.length)) - 1)
+			} catch {
+				alert(
+					'Validation impossible pour le moment : le numéro définitif est attribué par le serveur en mode multi-postes. Vérifiez la connexion Internet puis réessayez.',
+				)
+				return
+			} finally {
+				setValidating(null)
+			}
+			const latest = docsRef.current
+			const fresh = latest.find((d) => d.id === doc.id)
+			// Pièce supprimée ou déjà validée entre-temps (par exemple sur un autre poste)
+			if (!fresh || fresh.status !== 'draft') return
+			applyStatus(fresh, status, seq === null ? undefined : prefix + String(seq).padStart(4, '0'), latest)
+			return
+		}
+		applyStatus(doc, status, undefined, documents)
+	}
+
+	function applyStatus(doc: CommercialDocument, status: DocStatus, forcedNumber: string | undefined, documents: CommercialDocument[]) {
 		// Validation : numéro définitif, à la suite des pièces déjà validées (aucun trou possible)
-		const number = status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number
+		const number = forcedNumber ?? (status === 'validated' && doc.status === 'draft' ? finalNumber(doc, documents) : doc.number)
 		let next = documents.map((d) =>
 			d.id === doc.id ? { ...d, status, number, ...(status === 'validated' ? { validatedBy: stamp().by } : {}) } : d,
 		)
 		// Un autre brouillon portait déjà ce numéro provisoire : on lui en donne un nouveau
 		const clash = next.find((d) => d.id !== doc.id && d.kind === doc.kind && d.status === 'draft' && d.number === number)
-		if (clash) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
+		// (pas en multi-postes : ce brouillon peut appartenir à un autre poste, on ne le touche pas)
+		if (clash && !isSyncActive()) next = next.map((d) => (d.id === clash.id ? { ...d, number: nextNumber(d.kind, next, d.date) } : d))
 		if (number !== doc.number) setMessage({ text: `Numéro définitif attribué : ${number} (brouillon ${doc.number}).` })
 		access.log(status === 'validated' ? 'Pièce validée' : 'Pièce annulée', `${DOC_LABELS[doc.kind].title} ${number} · ${doc.party.name}`)
 		const supplier = doc.party.name
@@ -483,8 +519,13 @@ export default function DocumentsPage({
 														</button>
 													)}
 													{canValidate && (
-														<button type="button" className="btn-primary" onClick={() => setStatus(d, 'validated')}>
-															Valider
+														<button
+															type="button"
+															className="btn-primary"
+															disabled={validating !== null}
+															onClick={() => void setStatus(d, 'validated')}
+														>
+															{validating === d.id ? 'Validation…' : 'Valider'}
 														</button>
 													)}
 													{canDelete && (
@@ -508,7 +549,7 @@ export default function DocumentsPage({
 											{canDelete && d.status === 'validated' && d.kind !== 'invoice' && (
 												<button
 													type="button"
-													onClick={() => confirm(`Annuler ${d.number} ?`) && setStatus(d, 'cancelled')}
+													onClick={() => confirm(`Annuler ${d.number} ?`) && void setStatus(d, 'cancelled')}
 												>
 													Annuler
 												</button>

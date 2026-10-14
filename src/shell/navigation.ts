@@ -59,7 +59,7 @@ export const MODULES: ModuleDef[] = [
 		label: 'Paramètres',
 		groups: [
 			{ title: 'Dossier', pages: ['company', 'backup'] },
-			{ title: 'Administration', pages: ['users', 'audit'] },
+			{ title: 'Administration', pages: ['users', 'audit', 'sync'] },
 		],
 	},
 ]
@@ -100,10 +100,11 @@ export const PAGE_LABELS: Record<PageId, string> = {
 	backup: 'Sauvegarde',
 	users: 'Utilisateurs & droits',
 	audit: "Journal d'activité",
+	sync: 'Multi-postes',
 }
 
 /** Pages réservées à l'administrateur */
-export const ADMIN_PAGES: PageId[] = ['users', 'audit']
+export const ADMIN_PAGES: PageId[] = ['users', 'audit', 'sync']
 
 export function moduleOf(page: PageId): ModuleDef {
 	return MODULES.find((m) => m.groups.some((g) => g.pages.includes(page))) ?? MODULES[0]

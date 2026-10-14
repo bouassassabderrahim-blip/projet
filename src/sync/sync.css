@@ -1,0 +1,12 @@
+.sync-small { font-size: 13px !important; word-break: break-all; }
+.sync-steps { margin: 4px 0 8px; padding-left: 20px; line-height: 1.6; }
+.sync-invite { display: flex; gap: 8px; align-items: center; }
+.sync-invite code {
+	flex: 1;
+	padding: 6px 8px;
+	background: #f4f6f9;
+	border: 1px solid var(--pp-border);
+	border-radius: 3px;
+	font-size: 12px;
+	word-break: break-all;
+}

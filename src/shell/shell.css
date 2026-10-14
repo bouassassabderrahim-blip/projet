@@ -317,3 +317,6 @@ body:has(.layout.erp) { margin: 0; }
 }
 .erp-secure { background: #b45309 !important; }
 .erp-secure:hover { background: #d97706 !important; }
+.erp-status-sync { background: none; border: 0; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.erp-status-ok { color: #86efac; }
+.erp-status-error { color: #fca5a5; }

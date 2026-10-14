@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { FixedCost, PageId, Product } from './types'
 import { sampleProducts } from './data/sampleProducts'
 import Sidebar from './components/Sidebar'
@@ -41,6 +41,8 @@ import Launchpad from './shell/Launchpad'
 import { ADMIN_PAGES, MODULES, moduleOf, type ModuleId } from './shell/navigation'
 import { LAST_BACKUP_KEY, STORAGE_ERROR_EVENT } from './documents/storage'
 import { AccessContext, accessFor } from './access/context'
+import SyncPage from './sync/SyncPage'
+import { startFromConfig, useSyncStatus } from './sync/runtime'
 import { readSession, useAccessSettings, useAudit, useUsers, writeSession } from './access/storage'
 import type { AuditEntry, User } from './access/types'
 import LoginScreen from './access/LoginScreen'
@@ -91,6 +93,7 @@ const titles: Record<PageId, string> = {
 	company: 'Société et mise en page des documents',
 	backup: 'Sauvegarde des données',
 	users: 'Utilisateurs et droits d’accès',
+	sync: 'Multi-postes : utiliser l’ERP sur plusieurs ordinateurs',
 	audit: 'Journal d’activité',
 }
 
@@ -135,6 +138,7 @@ const commercialPages = new Set<PageId>([
 	'backup',
 	'users',
 	'audit',
+	'sync',
 ] as PageId[])
 
 function isProduct(x: unknown): x is Product {
@@ -311,11 +315,32 @@ export default function App() {
 
 	useEffect(() => {
 		try {
-			localStorage.setItem(FIXED_KEY, JSON.stringify(fixedCosts))
+			const raw = JSON.stringify(fixedCosts)
+			if (localStorage.getItem(FIXED_KEY) !== raw) localStorage.setItem(FIXED_KEY, raw)
 		} catch {
-			// stockage indisponible : on continue sans sauvegarde
+			window.dispatchEvent(new CustomEvent(STORAGE_ERROR_EVENT, { detail: FIXED_KEY }))
 		}
 	}, [fixedCosts])
+
+	// Charges fixes et devise modifiées sur un autre poste ou un autre onglet
+	useEffect(() => {
+		const onStorage = (e: StorageEvent) => {
+			if (e.key === FIXED_KEY) setFixedCosts(loadFixedCosts())
+			if (e.key === CURRENCY_KEY) {
+				const code = loadCurrency()
+				setCurrency(code)
+				setCurrencyState(code)
+			}
+		}
+		window.addEventListener('storage', onStorage)
+		return () => window.removeEventListener('storage', onStorage)
+	}, [])
+
+	// Mode multi-postes : reprise de la synchronisation au lancement
+	useEffect(() => {
+		startFromConfig()
+	}, [])
+	const syncStatus = useSyncStatus()
 
 	function changeCurrency(code: string) {
 		setCurrency(code)
@@ -388,8 +413,15 @@ export default function App() {
 	}
 
 	// BL, réceptions et retours de dépôt : mise à jour du stock des articles et des lots
+	// Dernières valeurs connues : un mouvement de stock peut suivre une attente réseau (validation multi-postes)
+	const latest = useRef({ products, lots })
+	useEffect(() => {
+		latest.current = { products, lots }
+	}, [products, lots])
+
 	function handleStockMove(lines: DocLine[], direction: 1 | -1, supplier?: string, reference?: string): Record<string, number> {
-		const result = applyMove({ products, lots }, lines, direction, supplier, reference)
+		const result = applyMove(latest.current, lines, direction, supplier, reference)
+		latest.current = { products: result.products, lots: result.lots }
 		handleEdit(result.products)
 		setLots(result.lots)
 		addMovements(result.movements)
@@ -697,11 +729,19 @@ export default function App() {
 					/>
 				)}
 				{page === 'audit' && <AuditPage entries={audit} />}
+				{page === 'sync' && <SyncPage />}
 				</ReadOnlyArea>
 				)}
 			</main>
 			</div>
-			<StatusBar companyName={company.name} documentsCount={documents.length} productsCount={products.length} lastBackup={lastBackup} />
+			<StatusBar
+				companyName={company.name}
+				documentsCount={documents.length}
+				productsCount={products.length}
+				lastBackup={lastBackup}
+				sync={syncStatus}
+				onOpenSync={() => navigate('sync')}
+			/>
 			{searchOpen && (
 				<GlobalSearch
 					documents={searchable.documents}
